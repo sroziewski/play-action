@@ -36,7 +36,9 @@ ENV URL=https://example.com \
     YT_FULLSCREEN=1 \
     COOKIES= \
     COOKIE_BANNER=reject \
-    OUT=/out/recording.mp4
+    OUT=/out/recording.mp4 \
+    AUDIO_ONLY=0 \
+    AUDIO_BITRATE=256
 
 VOLUME /out
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

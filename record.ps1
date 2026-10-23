@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-Records a web page in full-screen Chrome to an MP4 on this machine.
+Records a web page in full-screen Chrome to an MP4 (or, with -Audio, its sound
+to an .m4a) on this machine.
 
 .DESCRIPTION
 Runs the chrome-rec image, then copies the finished video out of the container
@@ -20,6 +21,10 @@ Saves .\recordings\Evening news.mp4.
 .EXAMPLE
 .\record.ps1 https://example.com -Dir D:\videos\tv -Title "Evening news"
 Saves D:\videos\tv\Evening news.mp4.
+
+.EXAMPLE
+.\record.ps1 https://example.com/... -Audio -Cookies .\cookies.txt -Title album
+Records only the sound, as AAC 256 kbit/s in an .m4a.
 
 .EXAMPLE
 .\record.ps1 https://example.com
@@ -97,6 +102,15 @@ param(
     # Rebuild the image even if it already exists.
     [switch] $Build,
 
+    # Record the page's sound only, to an AAC .m4a; presses Spotify's play
+    # button instead of going fullscreen.
+    [switch] $Audio,
+
+    # AAC bitrate in kbit/s for -Audio. No 320: ffmpeg's AAC encoder spends
+    # at most ~265 kbit/s on 44.1 kHz stereo, so it would be 256 in disguise.
+    [ValidateSet(128, 160, 192, 224, 256)]
+    [int] $AudioBitrate = 256,
+
     # Print the full usage guide and exit.
     [Parameter(Mandatory, ParameterSetName = 'Help')]
     [Alias('h')]
@@ -106,6 +120,7 @@ param(
 if ($Help) {
     Write-Host @'
 record.ps1 - records a web page in full-screen Chrome, with sound, to an MP4
+             (or only its sound to an .m4a, see AUDIO ONLY)
 
 USAGE
   .\record.ps1 <Url> [options]
@@ -150,6 +165,30 @@ PAGE HANDLING
                       It is copied into the container, never mounted.
   -KeepPage           Record the whole page instead of the fullscreen video
                       (YouTube and pages with a .play-action player).
+
+AUDIO ONLY
+  -Audio              Record only the page's sound, to <name>.m4a (AAC,
+                      44.1 kHz stereo). Nothing goes fullscreen; -Width,
+                      -Height, -Fps and -KeepPage don't matter. After the
+                      page loads, Spotify's play button is pressed: the
+                      album/playlist page's own big button, else the
+                      bottom-bar play/pause toggle; never one that already
+                      reads "Pauza"/"Pause" (= playing). Other pages: a
+                      .play-action button; YouTube simply plays.
+                      Recording starts just before the click, so the file
+                      opens with a moment of silence.
+  -AudioBitrate <k>   AAC bitrate in kbit/s: 128, 160, 192, 224 or 256
+                      (default). Spotify's web player streams at most AAC
+                      256 (Premium; 128 on Free), so 256 is the useful top;
+                      use 128 for spoken word or a Free account.
+  Length: without -Duration/-DurationMin on a Spotify album or playlist,
+  the track list's times are added up (+5 s, +0.25 s per track), shuffle
+  and repeat are switched off and playback starts from the first track, so
+  the file holds exactly the album. Elsewhere it records until Ctrl+C;
+  Ctrl+C always stops early.
+  Works with -Duration/-DurationMin, -Cookies, -CookieBanner, -Title, -Dir
+  and -Output (an .m4a name); not with -Compress or -KeepOriginal. Spotify needs a login:
+  pass your exported cookies with -Cookies.
 
 COMPRESSION (runs after recording)
   -Compress           Re-encode to H.265: usually 30-45% smaller, but takes
@@ -197,6 +236,7 @@ EXAMPLES
   .\record.ps1 https://www.youtube.com/watch?v=... -Compress
   .\record.ps1 https://site.com/page -Cookies .\site-cookies.txt -Duration 600
   .\record.ps1 https://example.com -Width 1280 -Height 720 -Output D:\vids\demo.mp4
+  .\record.ps1 https://example.com/... -Audio -Cookies .\cookies.txt -Title album
 
 GOOD TO KNOW
   Size: about 7.5 MB per minute for busy 1080p30 video, more at 60 fps; a
@@ -225,6 +265,14 @@ if ($PSBoundParameters.ContainsKey('DurationMin')) {
     $Duration = [math]::Max(1, [int][math]::Round($DurationMin * 60))
 }
 
+if ($Audio -and ($Compress -or $KeepOriginal)) {
+    throw '-Compress and -KeepOriginal re-encode video; they do not apply to -Audio.'
+}
+if (-not $Audio -and $PSBoundParameters.ContainsKey('AudioBitrate')) {
+    throw '-AudioBitrate only applies together with -Audio.'
+}
+$ext = if ($Audio) { '.m4a' } else { '.mp4' }
+
 # libx264 with yuv420p rejects odd frame sizes.
 if ($Width % 2 -or $Height % 2) {
     throw "Width and Height must be even numbers (got ${Width}x${Height})."
@@ -238,14 +286,20 @@ if ($Output -and ($Title -or $Dir)) {
 }
 if (-not $Output) {
     if (-not $Dir) { $Dir = Join-Path (Get-Location) 'recordings' }
-    $file = if ($Title) { "$Title.mp4" } else { "recording-$runId.mp4" }
+    $file = if ($Title) { "$Title$ext" } else { "recording-$runId$ext" }
     $Output = Join-Path $Dir $file
 }
-$Output = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)
+elseif ($Audio -and [IO.Path]::GetExtension($Output) -ne '.m4a') {
+    throw "-Audio saves an .m4a file; give -Output a .m4a name (got $Output)."
+}
+$Output =$ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)
 New-Item -ItemType Directory -Force (Split-Path $Output) -ErrorAction Stop | Out-Null
 
-docker image inspect $Image *> $null
-if ($Build -or $LASTEXITCODE -ne 0) {
+$imageEnv = docker image inspect -f '{{json .Config.Env}}' $Image 2> $null
+$missing = $LASTEXITCODE -ne 0
+# An image built before audio-only mode existed would quietly record video.
+$outdated = $Audio -and -not $missing -and "$imageEnv" -notmatch '"AUDIO_ONLY='
+if ($Build -or $missing -or $outdated) {
     Write-Host "Building image $Image..."
     docker build -t $Image $PSScriptRoot
     if ($LASTEXITCODE -ne 0) { throw 'docker build failed.' }
@@ -257,9 +311,12 @@ $runArgs = @(
     '-e', "URL=$Url",
     '-e', "WIDTH=$Width", '-e', "HEIGHT=$Height", '-e', "FPS=$Fps",
     '-e', "WARMUP=$Warmup",
-    '-e', "YT_FULLSCREEN=$(if ($KeepPage) { 0 } else { 1 })",
+    '-e', "YT_FULLSCREEN=$(if ($KeepPage -or $Audio) { 0 } else { 1 })",
     '-e', "COOKIE_BANNER=$CookieBanner"
 )
+if ($Audio) {
+    $runArgs += '-e', 'AUDIO_ONLY=1', '-e', "AUDIO_BITRATE=$AudioBitrate", '-e', 'OUT=/out/recording.m4a'
+}
 if ($Duration) { $runArgs += '-e', "DURATION=$Duration" }
 if ($Cookies) { $runArgs += '-e', 'COOKIES=/tmp/cookies.txt' }
 $runArgs += $Image
@@ -274,8 +331,15 @@ if ($Cookies) {
 docker start $name | Out-Null
 if ($LASTEXITCODE -ne 0) { docker rm -v $name *> $null; throw 'docker start failed.' }
 
-$length = if ($Duration) { "$Duration s" } else { 'until Ctrl+C' }
-Write-Host "Recording $Url at ${Width}x${Height} ${Fps} fps, $length"
+$length = if ($Duration) { "$Duration s" }
+    elseif ($Audio -and $Url -match '^https?://open\.spotify\.com/(intl-[a-z-]+/)?(album|playlist)/') { 'as long as the album/playlist (else until Ctrl+C)' }
+    else { 'until Ctrl+C' }
+if ($Audio) {
+    Write-Host "Recording the sound of $Url as AAC $AudioBitrate kbit/s, $length"
+}
+else {
+    Write-Host "Recording $Url at ${Width}x${Height} ${Fps} fps, $length"
+}
 
 function Format-Time([int] $seconds) {
     '{0:00}:{1:00}' -f [math]::Floor($seconds / 60), ($seconds % 60)
@@ -327,21 +391,33 @@ function Compress-Recording([string] $source, [string] $target) {
 # The copy-out lives in `finally` so that Ctrl+C, which ends the wait loop,
 # still stops the recorder cleanly and saves what was recorded so far.
 $startedAt = $null
+$limit = $Duration
 $setup = [Diagnostics.Stopwatch]::StartNew()
 try {
     while ((docker inspect -f '{{.State.Running}}' $name) -eq 'true') {
         # The markers are on the container's stdout; its stderr is only noise.
-        if (-not $startedAt -and (docker logs $name 2>$null | Select-String -SimpleMatch 'recording started' -Quiet)) {
-            $startedAt = Get-Date
+        if (-not $startedAt) {
+            $log = docker logs $name 2>$null
+            if ($log | Select-String -SimpleMatch 'recording started' -Quiet) {
+                $startedAt = Get-Date
+                # -Audio without a length: the recorder took it from the track
+                # list. Not stored in $Duration: its ValidateRange re-checks on
+                # assignment and a playlist over 24 h would throw.
+                $auto = $log | Select-String '^recording length: (\d+) s' | Select-Object -First 1
+                if ($auto -and -not $Duration) {
+                    $limit = [int]$auto.Matches[0].Groups[1].Value
+                    Write-Host ("`r" + "  Length from the Spotify track list: $(Format-Time $limit)".PadRight(60))
+                }
+            }
         }
         $line = if (-not $startedAt) {
             "  Preparing page... $(Format-Time $setup.Elapsed.TotalSeconds)"
         }
         else {
             $elapsed = [int]((Get-Date) - $startedAt).TotalSeconds
-            if ($Duration) {
-                $elapsed = [math]::Min($elapsed, $Duration)
-                "  REC $(Format-Time $elapsed) / $(Format-Time $Duration)  ($(Format-Time ($Duration - $elapsed)) left)"
+            if ($limit) {
+                $elapsed = [math]::Min($elapsed, $limit)
+                "  REC $(Format-Time $elapsed) / $(Format-Time $limit)  ($(Format-Time ($limit - $elapsed)) left)"
             }
             else {
                 "  REC $(Format-Time $elapsed)  (Ctrl+C to stop)"
@@ -355,16 +431,23 @@ finally {
     # The timer starts on a polled log line, so it can trail ffmpeg by up to a
     # poll interval; a completed timed recording did record the full length.
     $finished = (docker inspect -f '{{.State.Running}} {{.State.ExitCode}}' $name) -eq 'false 0'
-    if ($finished -and $startedAt -and $Duration) {
-        Write-Host -NoNewline ("`r" + "  REC $(Format-Time $Duration) / $(Format-Time $Duration)  (00:00 left)".PadRight(60))
+    # A stopped container exits 0 too; only a run that lasted its length is complete.
+    if ($finished -and $startedAt -and $limit -and ((Get-Date) - $startedAt).TotalSeconds -ge $limit - 2) {
+        Write-Host -NoNewline ("`r" + "  REC $(Format-Time $limit) / $(Format-Time $limit)  (00:00 left)".PadRight(60))
     }
     Write-Host ''
     # Generous timeout: after a stop the container still trims the file's end.
     docker stop -t 120 $name *> $null
     docker logs $name 2>$null | Where-Object { "$_" -like 'browse: *' } | ForEach-Object { Write-Host "  $_" }
     $exitCode = [int](docker inspect -f '{{.State.ExitCode}}' $name)
-    docker cp "${name}:/out/recording.mp4" $Output *> $null
+    docker cp "${name}:/out/recording$ext" $Output *> $null
     $copied = $LASTEXITCODE -eq 0
+    if ($Audio -and -not $copied) {
+        # The raw capture survives a failed repackaging; it plays in most players.
+        $raw = [IO.Path]::ChangeExtension($Output, '.aac')
+        docker cp "${name}:/out/recording.audio.aac" $raw *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Host "Kept the unprocessed capture as $raw" }
+    }
     if (-not $copied -or $exitCode -ne 0) {
         Write-Host 'Container log:'
         docker logs --tail 30 $name 2>&1 | ForEach-Object { Write-Host "  $_" }

@@ -30,7 +30,7 @@ wait_for() {
 
 # A restarted container keeps /tmp but restarts PIDs from 1, so stale pid and
 # lock files point at live processes and the daemons refuse to start.
-rm -f /tmp/pulse-*/pid /tmp/.X99-lock
+rm -f /tmp/pulse-*/pid /tmp/.X99-lock /tmp/auto-duration
 rm -rf /tmp/chrome-profile
 # Chrome's UI is English, so it offers to translate every other page with a
 # bubble in the corner; --disable-features=Translate no longer stops that,
@@ -68,6 +68,59 @@ timeout 240 browse.py open "$URL" & wait $! || true
 
 sleep "$WARMUP" & wait $! || true
 (( stop )) && exit 0
+
+# Audio only: one ffmpeg, no screen grab. 44.1 kHz is what Spotify and most
+# music is mastered at; ffmpeg's pulse input would otherwise ask for 48 kHz
+# and resample. The capture is an ADTS stream flushed per packet, which stays
+# playable if the container is killed (a killed .m4a has no index), and is
+# repackaged into .m4a without re-encoding at the end. Capture starts before
+# the play click: the other way round the first half second of the track
+# would be lost, this way the file opens with a moment of silence.
+# ffmpeg's AAC encoder low-passes by default and then never spends more than
+# about 225 kbit/s whatever is asked; with a 20 kHz cutoff 256 really gives
+# ~256 (measured on pink noise), and the top octave Spotify keeps survives.
+if [[ ${AUDIO_ONLY:-0} == 1 ]]; then
+  [[ ${OUT##*/} == *.* ]] && base=${OUT%.*} || base=$OUT
+  capture=$base.audio.aac
+  limit=()
+  [[ -n "$DURATION" ]] && limit=(-t "$DURATION")
+  # Written by `browse.py open` from a Spotify album's or playlist's track list.
+  if [[ -z "$DURATION" && -s /tmp/auto-duration ]]; then
+    auto=
+    read -r auto < /tmp/auto-duration || true
+    if [[ $auto =~ ^[0-9]+$ ]]; then
+      limit=(-t "$auto")
+      echo "recording length: $auto s"
+    else
+      echo "ignoring a malformed length from the track list: $auto" >&2
+    fi
+  fi
+  rm -f "$OUT"
+  ffmpeg -hide_banner -loglevel warning -y \
+    "${limit[@]}" -f pulse -sample_rate 44100 -channels 2 -i rec.monitor \
+    -c:a aac -b:a "${AUDIO_BITRATE}k" -cutoff 20000 -flush_packets 1 -f adts "$capture" </dev/null &
+  ffmpeg_pids+=($!)
+  (( stop )) && stop_capture
+  echo "recording started"
+  browse.py play-audio &
+
+  while :; do
+    pid= code=0
+    wait -n -p pid "${ffmpeg_pids[0]}" || code=$?
+    [[ -n "${pid:-}" ]] && break  # an interrupted wait unsets it
+  done
+  (( code == 255 )) && code=0
+  if [[ -s "$capture" ]] \
+     && ffmpeg -hide_banner -loglevel error -y -i "$capture" -c copy -movflags +faststart -f ipod "$OUT.part.m4a" \
+     && [[ -s "$OUT.part.m4a" ]]; then
+    { mv "$OUT.part.m4a" "$OUT" && rm -f "$capture"; } || code=1
+  else
+    rm -f "$OUT.part.m4a"
+    echo "saving $capture as $OUT failed; it is kept" >&2
+    code=1
+  fi
+  exit "$code"
+fi
 
 # Video and audio are captured by separate ffmpeg processes. In one process
 # ffmpeg holds the screen grab back whenever the PulseAudio input runs late,

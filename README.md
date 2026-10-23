@@ -23,6 +23,7 @@ It records a live stream, a TV player, a YouTube video or a dashboard, and you c
 - [Quick start](#quick-start)
 - [Options](#options)
 - [What happens on the page](#what-happens-on-the-page)
+- [Audio only](#audio-only--audio)
 - [Logged-in pages](#logged-in-pages--cookies)
 - [File size and compression](#file-size-and-compression)
 - [How it works](#how-it-works)
@@ -40,6 +41,7 @@ It records a live stream, a TV player, a YouTube video or a dashboard, and you c
 - ▶️ **Players started for you:** on YouTube it skips the consent screen, waits out ads, picks the original audio track, turns subtitles off, goes fullscreen and starts from 0:00. Players with a `.play-action` button (Shaka) are clicked and switched to fullscreen.
 - 🔐 **Logged-in recording:** it can use cookies exported from your own browser.
 - ⏱️ **Timed or open-ended:** `-Duration` (seconds), `-DurationMin` (minutes), or record until Ctrl+C. Stopping early keeps everything recorded so far.
+- 🎧 **Audio only:** `-Audio` saves just the sound as AAC 256 kbit/s `.m4a`, pressing Spotify's play button for you.
 - 🗜️ **Optional H.265:** `-Compress` makes the file 30–45 % smaller.
 - 🧹 **Nothing left behind:** each run uses a fresh container, which is removed afterwards.
 
@@ -121,6 +123,13 @@ An existing file of the same name is overwritten.
 | `-Preset <name>` | `medium` | `ultrafast` … `veryslow`. Slower presets give smaller files |
 | `-KeepOriginal` | off | Also keep the H.264 file as `<name>.h264.mp4` |
 
+### Audio only
+
+| Option | Default | Meaning |
+|---|---|---|
+| `-Audio` | off | Record only the sound, to `<name>.m4a` ([details](#audio-only--audio)) |
+| `-AudioBitrate <k>` | `256` | AAC bitrate in kbit/s: `128`, `160`, `192`, `224` or `256`. Only with `-Audio` |
+
 ### Docker
 
 | Option | Default | Meaning |
@@ -142,6 +151,9 @@ An existing file of the same name is overwritten.
 
 # 720p, the whole page rather than the fullscreen player
 .\record.ps1 https://example.com -Width 1280 -Height 720 -KeepPage -Output D:\vids\demo.mp4
+
+# sound only, logged in; on an album or playlist the length comes from the track list
+.\record.ps1 https://example.com/... -Audio -Cookies .\cookies.txt -Title album
 ```
 
 ## What happens on the page
@@ -177,6 +189,51 @@ Chrome's own "Translate this page?" popup is switched off everywhere.
 On other pages, about a second into the recording, the tool clicks the first match of `.play-action .podp`, `.play-action` or `.glownybutton.play`. It uses a real mouse click, because players ignore script clicks, and waits up to 10 s for the button to appear. Then, unless you pass `-KeepPage`, it presses the player's fullscreen button (`.shaka-fullscreen-button`).
 
 This happens on camera, so the first seconds show the page and Chrome's "press Esc to exit full screen" notice. The log says `clicked the play button`, `no play button on the page`, or names the element that covers the button.
+
+## Audio only (`-Audio`)
+
+`-Audio` records just the page's sound. Nothing goes fullscreen and no video is encoded, so it needs very little CPU.
+
+```powershell
+.\record.ps1 https://example.com/... -Audio -Cookies .\cookies.txt -Title album
+```
+
+1. The page opens exactly as in video mode, with the same cookies and cookie banner handling.
+2. Recording starts, and the tool then presses Spotify's play button with a real mouse click:
+   - On an album, playlist, track, artist or podcast page, it uses the page's own big green button, so what the URL shows is played.
+   - Elsewhere, it uses the bottom-bar play/pause toggle (`[data-testid="control-button-playpause"]`), which resumes whatever the account played last.
+   - On other sites it uses a `.play-action` button; on YouTube it simply starts the video.
+
+   Because recording starts first, the file opens with a moment of silence; the other way round, the start of the track would be lost.
+3. Spotify labels these buttons with what a click would do, so **"Pauza"/"Pause" means it is already playing**. The tool then leaves the button alone, because a click would stop the music.
+4. After clicking, it checks that playback really started. The log says `playback started`, `already playing`, that the page reports a DRM error, or that playback didn't seem to start.
+
+| | |
+|---|---|
+| Format | AAC-LC in `.m4a`, 44.1 kHz stereo (Spotify's own sample rate, so nothing is resampled) |
+| Bitrate | 256 kbit/s by default (about 1.9 MB per minute); `-AudioBitrate` 128–256 |
+| Length | **Automatic on a Spotify album or playlist**: the track list's times added up, see below. Otherwise `-Duration` / `-DurationMin`, or until Ctrl+C. Stopping keeps everything so far |
+| Not with | `-Compress`, `-KeepOriginal` (they re-encode video). `-Output` must end in `.m4a` |
+| If saving fails | The raw capture is kept next to it as `<name>.aac` |
+
+**Automatic length.** On an album or playlist page, without `-Duration`/`-DurationMin`, the tool records exactly the album:
+- **Total:** it scrolls through the whole track list (Spotify only renders the rows on screen) and adds up every track's time. It only trusts the sum when it has read as many tracks as the list says it has.
+- **Rounding:** the list shows each time rounded down to the second; that 24-track album sums to 54:00 but really lasts 54:12. On albums the tool uses the header's exact total ("54 min 12 sec") when it fits the rounding. On playlists, whose header only says "about 2 hr 45 min", it counts each track as 1 s longer, the worst case.
+- **Margin:** it records that total plus 5 s, plus 0.25 s per track for start-up and buffering. For the 24-track, 54:12 album that is 54:23. Multi-disc "Disc N" headings are not counted as tracks.
+- **From the top, in order:** it pauses playback during the warm-up and switches shuffle and repeat off. This changes the setting on your account, just as clicking them in the app would. When recording begins, it starts **track 1 from 0:00**.
+- **Countdown:** the status line counts down (`REC 01:12 / 54:23`), and the log says `track list: 24 tracks, 54:12; recording 54:23 from the first track`.
+- **Fallback:** if no complete list is found (track, artist and podcast pages, or another site), it records until Ctrl+C as before. Ctrl+C or an explicit `-Duration` always takes precedence.
+
+**Why 256 kbit/s:** Spotify's web player streams AAC at up to 256 kbit/s on Premium and 128 on Free, and it can't be set higher. 256 keeps everything the stream carries. There is no 320, because the encoder in the image (ffmpeg's own AAC) spends at most about 265 kbit/s on 44.1 kHz stereo. Use 128 for spoken word or a Free account.
+
+**Spotify notes:**
+- **Login:** you have to be logged in. Export your cookies from open.spotify.com (the login cookie is `sp_dc`) and pass them with `-Cookies`.
+- **One device at a time:** Spotify plays on only one device at a time. If the account is playing on your phone, the desktop app or another browser, the recorder's page would only be a remote control and the file would be silent. So before recording, the tool opens Spotify's device picker and switches playback to "This web browser" (`moved Spotify playback from "…" to this browser` in the log). **This stops the music on your other device** for as long as the recording runs.
+- **Proof of sound:** after the click the tool checks that sound really reaches the recorder. If none arrives, the log says `no sound is reaching the recorder` instead of a misleading "playing".
+- **DRM:** playback needs Chrome's built-in Widevine DRM, which the image includes. If the page says protected content is disabled, the log reports it and the file will be silent.
+- **Terms:** Spotify's terms don't allow copying its content, so keep recordings to your own private use.
+
+The first `-Audio` run with an image built before this feature rebuilds it automatically.
 
 ## Logged-in pages (`-Cookies`)
 
@@ -274,12 +331,15 @@ docker rm tmp
 | `COOKIE_BANNER` | `reject` | `reject`, `accept` or `keep` |
 | `COOKIES` | *(empty)* | Path of a cookies file inside the container |
 | `OUT` | `/out/recording.mp4` | Output file inside the container, overwritten on each run |
+| `AUDIO_ONLY` | `0` | `1` records only the sound (AAC in `.m4a`; set `OUT` to a `.m4a` name) |
+| `AUDIO_BITRATE` | `256` | AAC bitrate in kbit/s for `AUDIO_ONLY=1` |
 
 ## Output
 
 - H.264 video (libx264 `veryfast`, CRF 23) and AAC 128 kbit/s audio. The recorder writes a fragmented MP4; `-Compress` output is a regular MP4 with the index at the front.
 - The audio track is there even when the page is silent.
 - Page sound plays automatically; no click is needed.
+- With `-Audio`: an `.m4a` with AAC audio only, see [Audio only](#audio-only--audio).
 - The mouse pointer is not recorded.
 
 ## Known limits
