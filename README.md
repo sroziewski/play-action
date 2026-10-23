@@ -50,7 +50,7 @@ It records a live stream, a TV player, a YouTube video or a dashboard, and you c
 ## Quick start
 
 ```powershell
-git clone https://github.com/sroziewski/play-action.git   # private: needs access
+git clone https://github.com/sroziewski/play-action.git
 cd play-action
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned       # once, if scripts are blocked
 
