@@ -90,8 +90,9 @@ Saved D:\...\recordings\recording-20261023-100201-f935.mp4 (1.2 MB)
 
 | Option | Default | Meaning |
 |---|---|---|
-| `-Title <name>` | | File name without extension, saved as `.\recordings\<name>.mp4` |
-| `-Output <path>` | `.\recordings\recording-<timestamp>-<id>.mp4` | Full path of the MP4. Not together with `-Title` |
+| `-Dir <folder>` | `.\recordings` | Folder to save in, relative to the current folder or absolute; created if missing |
+| `-Title <name>` | `recording-<timestamp>-<id>` | File name without extension, saved as `<Dir>\<name>.mp4` |
+| `-Output <path>` | | Full path of the MP4 instead. Not together with `-Dir` or `-Title` |
 
 An existing file of the same name is overwritten.
 
@@ -130,8 +131,8 @@ An existing file of the same name is overwritten.
 ### Examples
 
 ```powershell
-# One hour of a 50 fps TV stream, with a readable file name
-.\record.ps1 https://tv.example/live -Fps 50 -DurationMin 60 -Title "news 23-10"
+# One hour of a 50 fps TV stream, with a readable file name, into D:\videos\tv
+.\record.ps1 https://tv.example/live -Fps 50 -DurationMin 60 -Dir D:\videos\tv -Title "news 23-10"
 
 # A YouTube video as a smaller H.265 file
 .\record.ps1 "https://www.youtube.com/watch?v=..." -Compress

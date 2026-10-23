@@ -18,6 +18,10 @@ missing. Without -Duration it records until you press Ctrl+C.
 Saves .\recordings\Evening news.mp4.
 
 .EXAMPLE
+.\record.ps1 https://example.com -Dir D:\videos\tv -Title "Evening news"
+Saves D:\videos\tv\Evening news.mp4.
+
+.EXAMPLE
 .\record.ps1 https://example.com
 Records until Ctrl+C.
 #>
@@ -51,9 +55,13 @@ param(
     # Where the MP4 goes; defaults to .\recordings\recording-<timestamp>.mp4.
     [string] $Output,
 
-    # File name without extension, saved as .\recordings\<Title>.mp4.
+    # File name without extension, saved as <Dir>\<Title>.mp4.
     [ValidateScript({ $_.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -lt 0 -and $_.Trim(' .') })]
     [string] $Title,
+
+    # Folder for the recording, created if missing; defaults to .\recordings.
+    [ValidateNotNullOrEmpty()]
+    [string] $Dir,
 
     [string] $Image = 'chrome-rec',
 
@@ -117,9 +125,11 @@ WHAT TO RECORD
                       Default 3.
 
 WHERE TO SAVE
-  -Title <name>       File name without extension: .\recordings\<name>.mp4
-  -Output <path>      Full path of the MP4. Not together with -Title.
-                      Default: .\recordings\recording-<timestamp>.mp4
+  -Dir <folder>       Folder to save in, created if missing. Default
+                      .\recordings (under the current folder).
+  -Title <name>       File name without extension: <Dir>\<name>.mp4
+                      Default name: recording-<timestamp>-<id>.mp4
+  -Output <path>      Full path of the MP4 instead; not with -Dir or -Title.
                       A file that already exists is overwritten.
 
 PICTURE
@@ -183,6 +193,7 @@ EXAMPLES
   .\record.ps1 https://example.com -Duration 30
   .\record.ps1 https://example.com -Title "Evening news"
   .\record.ps1 https://tv.example/live -Fps 50 -Title news -DurationMin 60
+  .\record.ps1 https://example.com -Dir D:\videos\tv -Title "Evening news"
   .\record.ps1 https://www.youtube.com/watch?v=... -Compress
   .\record.ps1 https://site.com/page -Cookies .\site-cookies.txt -Duration 600
   .\record.ps1 https://example.com -Width 1280 -Height 720 -Output D:\vids\demo.mp4
@@ -222,14 +233,13 @@ if ($Width % 2 -or $Height % 2) {
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 # The suffix keeps recordings started in the same second apart.
 $runId = "$stamp-$('{0:x4}' -f (Get-Random -Maximum 0x10000))"
-if ($Title -and $Output) {
-    throw 'Use either -Title or -Output, not both.'
+if ($Output -and ($Title -or $Dir)) {
+    throw '-Output is a full path; use it without -Title and -Dir.'
 }
-if ($Title) {
-    $Output = Join-Path (Get-Location) "recordings\$Title.mp4"
-}
-elseif (-not $Output) {
-    $Output = Join-Path (Get-Location) "recordings\recording-$runId.mp4"
+if (-not $Output) {
+    if (-not $Dir) { $Dir = Join-Path (Get-Location) 'recordings' }
+    $file = if ($Title) { "$Title.mp4" } else { "recording-$runId.mp4" }
+    $Output = Join-Path $Dir $file
 }
 $Output = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)
 New-Item -ItemType Directory -Force (Split-Path $Output) -ErrorAction Stop | Out-Null
