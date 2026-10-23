@@ -1,0 +1,5 @@
+* text=auto
+# Run inside the Linux container: a CRLF checkout breaks the shebang and bash.
+*.sh       text eol=lf
+*.py       text eol=lf
+Dockerfile text eol=lf

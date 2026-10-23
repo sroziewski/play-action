@@ -1,0 +1,9 @@
+recordings
+*.mp4
+README.md
+record.ps1
+.git
+*.mkv
+*.mka
+*[Cc]ookies*
+.env*

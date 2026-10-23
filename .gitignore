@@ -1,0 +1,19 @@
+# Recordings and the recorder's intermediate files
+recordings/
+*.mp4
+*.mkv
+*.mka
+
+# Exported browser cookies are logins
+*[Cc]ookies*.txt
+*[Cc]ookies*.json
+.env
+.env.*
+
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store

@@ -1,0 +1,404 @@
+<#
+.SYNOPSIS
+Records a web page in full-screen Chrome to an MP4 on this machine.
+
+.DESCRIPTION
+Runs the chrome-rec image, then copies the finished video out of the container
+and removes the container. Builds the image from this folder when it is
+missing. Without -Duration it records until you press Ctrl+C.
+
+.EXAMPLE
+.\record.ps1 https://example.com -Duration 30
+
+.EXAMPLE
+.\record.ps1 https://example.com -Width 1280 -Height 720 -Fps 60 -Output demo.mp4
+
+.EXAMPLE
+.\record.ps1 https://example.com -Title "Evening news"
+Saves .\recordings\Evening news.mp4.
+
+.EXAMPLE
+.\record.ps1 https://example.com
+Records until Ctrl+C.
+#>
+[CmdletBinding(DefaultParameterSetName = 'Record')]
+param(
+    [Parameter(Mandatory, Position = 0, ParameterSetName = 'Record')]
+    [ValidatePattern('^(https?|file)://')]
+    [string] $Url,
+
+    # Seconds to record; omit to record until Ctrl+C.
+    [ValidateRange(1, 86400)]
+    [int] $Duration,
+
+    # The same in minutes, fractions allowed (1.5 = 90 s); not with -Duration.
+    [ValidateRange(0.02, 1440)]
+    [double] $DurationMin,
+
+    [ValidateRange(16, 7680)]
+    [int] $Width = 1920,
+
+    [ValidateRange(16, 4320)]
+    [int] $Height = 1080,
+
+    [ValidateRange(1, 120)]
+    [int] $Fps = 60,
+
+    # Seconds the page gets to load before recording starts.
+    [ValidateRange(0, 600)]
+    [int] $Warmup = 3,
+
+    # Where the MP4 goes; defaults to .\recordings\recording-<timestamp>.mp4.
+    [string] $Output,
+
+    # File name without extension, saved as .\recordings\<Title>.mp4.
+    [ValidateScript({ $_.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -lt 0 -and $_.Trim(' .') })]
+    [string] $Title,
+
+    [string] $Image = 'chrome-rec',
+
+    # Record the whole page instead of the fullscreen video (YouTube and
+    # .play-action players).
+    [switch] $KeepPage,
+
+    # After recording, re-encode to H.265: 30-45% smaller, but takes about
+    # 1-2.5x the recording's length on all CPU cores.
+    [switch] $Compress,
+
+    # H.265 quality for -Compress: lower is better and bigger; 26 looks about
+    # like the live H.264 recording.
+    [ValidateRange(0, 51)]
+    [int] $Crf = 26,
+
+    # H.265 speed for -Compress: slower presets give smaller files.
+    [ValidateSet('ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'slower', 'veryslow')]
+    [string] $Preset = 'medium',
+
+    # With -Compress, also keep the uncompressed H.264 recording next to it.
+    [switch] $KeepOriginal,
+
+    # Cookies exported from your own browser (cookies.txt or JSON), so the page
+    # opens logged in. The file is a login: keep it private.
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    [string] $Cookies,
+
+    # What to press on a site's cookie banner; 'keep' leaves it on screen.
+    [ValidateSet('reject', 'accept', 'keep')]
+    [string] $CookieBanner = 'reject',
+
+    # Rebuild the image even if it already exists.
+    [switch] $Build,
+
+    # Print the full usage guide and exit.
+    [Parameter(Mandatory, ParameterSetName = 'Help')]
+    [Alias('h')]
+    [switch] $Help
+)
+
+if ($Help) {
+    Write-Host @'
+record.ps1 - records a web page in full-screen Chrome, with sound, to an MP4
+
+USAGE
+  .\record.ps1 <Url> [options]
+  .\record.ps1 -Help
+
+  Chrome runs in kiosk mode (no tabs or address bar) inside a Docker
+  container. When the recording ends, the MP4 is copied to this machine and
+  the container is removed. Without -Duration it records until you press
+  Ctrl+C; whatever was recorded up to then is kept.
+
+WHAT TO RECORD
+  <Url>               Page to open: http://, https:// or file://  (required)
+  -Duration <s>       Seconds to record, 1-86400. Omit to record until Ctrl+C.
+  -DurationMin <m>    The same in minutes, up to 1440; fractions are allowed
+                      (1.5 = 90 s). Not together with -Duration.
+  -Warmup <s>         Seconds the page gets to load before recording starts.
+                      Default 3.
+
+WHERE TO SAVE
+  -Title <name>       File name without extension: .\recordings\<name>.mp4
+  -Output <path>      Full path of the MP4. Not together with -Title.
+                      Default: .\recordings\recording-<timestamp>.mp4
+                      A file that already exists is overwritten.
+
+PICTURE
+  -Width <px>         Video width, even number. Default 1920.
+  -Height <px>        Video height, even number. Default 1080.
+  -Fps <n>            Frames per second, 1-120. Default 60, which suits 30 and
+                      60 fps videos (most of YouTube). Use 50 for 25/50 fps
+                      sources such as European TV, or the video judders.
+
+PAGE HANDLING
+  -CookieBanner <x>   What to press on the site's cookie banner:
+                        reject  reject optional cookies (default)
+                        accept  accept, for pages that only work after it
+                        keep    leave the banner on screen
+  -Cookies <file>     Cookies exported from your own browser (cookies.txt or
+                      JSON, e.g. with "Get cookies.txt LOCALLY"), so the page
+                      opens logged in. The file IS a login: keep it private.
+                      It is copied into the container, never mounted.
+  -KeepPage           Record the whole page instead of the fullscreen video
+                      (YouTube and pages with a .play-action player).
+
+COMPRESSION (runs after recording)
+  -Compress           Re-encode to H.265: usually 30-45% smaller, but takes
+                      about 1-2.5 minutes per minute of video on all cores.
+                      Ctrl+C or a failure keeps the H.264 file; so does an
+                      H.265 file that came out bigger.
+  -Crf <0-51>         H.265 quality: lower is better and bigger. Default 26;
+                      28 is fine for talking heads.
+  -Preset <name>      H.265 speed: ultrafast, superfast, veryfast, faster,
+                      fast, medium (default), slow, slower, veryslow.
+                      Slower presets give smaller files.
+  -KeepOriginal       With -Compress, also keep the H.264 file as
+                      <name>.h264.mp4.
+
+DOCKER
+  -Image <name>       Docker image to run. Default chrome-rec.
+  -Build              Rebuild the image, e.g. after editing the Dockerfile,
+                      browse.py or entrypoint.sh. It is built automatically
+                      when it doesn't exist yet.
+
+WHAT HAPPENS ON THE PAGE
+  YouTube (watch, shorts, live, youtu.be links):
+    "Before you continue" dialog pre-accepted, ads waited out (up to 2 min),
+    the original audio track picked instead of an auto-dub, subtitles off,
+    fullscreen (unless -KeepPage), rewound to 0:00 and started about a second
+    into the recording.
+  Other pages:
+    The cookie banner is handled as -CookieBanner says (it keeps looking for
+    up to 12 s, since banners appear late). A .play-action play button, if
+    there is one, is clicked about a second into the recording, followed by
+    the player's fullscreen button (unless -KeepPage).
+  The lines starting with "browse:" at the end of the run say what was done.
+
+PROGRESS
+  Preparing page... 00:05            page loading, banners, ads
+  REC 00:12 / 00:30 (00:18 left)     recording with -Duration
+  REC 00:12 (Ctrl+C to stop)         recording without -Duration
+  H.265 12:34 / 90:00 (14%, ETA ..)  compressing
+
+EXAMPLES
+  .\record.ps1 https://example.com -Duration 30
+  .\record.ps1 https://example.com -Title "Evening news"
+  .\record.ps1 https://tv.example/live -Fps 50 -Title news -DurationMin 60
+  .\record.ps1 https://www.youtube.com/watch?v=... -Compress
+  .\record.ps1 https://site.com/page -Cookies .\site-cookies.txt -Duration 600
+  .\record.ps1 https://example.com -Width 1280 -Height 720 -Output D:\vids\demo.mp4
+
+GOOD TO KNOW
+  Size: about 7.5 MB per minute for busy 1080p30 video, more at 60 fps; a
+  static page takes a few hundred KB per minute. -Fps 30 or -Compress
+  make files smaller.
+  CPU: 1080p at 50-60 fps needs about 3.5 cores. Lower -Fps or the size on
+  small machines.
+  Sound and picture are lined up to within about 40 ms. If sound can't be
+  captured, the video is saved without it.
+  Asian and Arabic text shows as boxes unless you add fonts to the Dockerfile.
+
+More detail in README.md next to this script.
+'@
+    exit 0
+}
+
+# Not 'Stop': Windows PowerShell 5.1 turns every stderr line of a native
+# command into an error record, so harmless docker/Xvfb warnings would abort
+# the script. Native failures are checked through $LASTEXITCODE instead.
+$ErrorActionPreference = 'Continue'
+
+if ($PSBoundParameters.ContainsKey('DurationMin')) {
+    if ($PSBoundParameters.ContainsKey('Duration')) {
+        throw 'Use either -Duration or -DurationMin, not both.'
+    }
+    $Duration = [math]::Max(1, [int][math]::Round($DurationMin * 60))
+}
+
+# libx264 with yuv420p rejects odd frame sizes.
+if ($Width % 2 -or $Height % 2) {
+    throw "Width and Height must be even numbers (got ${Width}x${Height})."
+}
+
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+# The suffix keeps recordings started in the same second apart.
+$runId = "$stamp-$('{0:x4}' -f (Get-Random -Maximum 0x10000))"
+if ($Title -and $Output) {
+    throw 'Use either -Title or -Output, not both.'
+}
+if ($Title) {
+    $Output = Join-Path (Get-Location) "recordings\$Title.mp4"
+}
+elseif (-not $Output) {
+    $Output = Join-Path (Get-Location) "recordings\recording-$runId.mp4"
+}
+$Output = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)
+New-Item -ItemType Directory -Force (Split-Path $Output) -ErrorAction Stop | Out-Null
+
+docker image inspect $Image *> $null
+if ($Build -or $LASTEXITCODE -ne 0) {
+    Write-Host "Building image $Image..."
+    docker build -t $Image $PSScriptRoot
+    if ($LASTEXITCODE -ne 0) { throw 'docker build failed.' }
+}
+
+$name = "chrome-rec-$runId"
+$runArgs = @(
+    'create', '--name', $name, '--shm-size=2g',
+    '-e', "URL=$Url",
+    '-e', "WIDTH=$Width", '-e', "HEIGHT=$Height", '-e', "FPS=$Fps",
+    '-e', "WARMUP=$Warmup",
+    '-e', "YT_FULLSCREEN=$(if ($KeepPage) { 0 } else { 1 })",
+    '-e', "COOKIE_BANNER=$CookieBanner"
+)
+if ($Duration) { $runArgs += '-e', "DURATION=$Duration" }
+if ($Cookies) { $runArgs += '-e', 'COOKIES=/tmp/cookies.txt' }
+$runArgs += $Image
+
+docker @runArgs | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'docker create failed.' }
+if ($Cookies) {
+    # Copied rather than mounted: the copy dies with the container (`rm -v` below).
+    docker cp (Resolve-Path -LiteralPath $Cookies).Path "${name}:/tmp/cookies.txt" *> $null
+    if ($LASTEXITCODE -ne 0) { docker rm -v $name *> $null; throw 'Could not copy the cookies file into the container.' }
+}
+docker start $name | Out-Null
+if ($LASTEXITCODE -ne 0) { docker rm -v $name *> $null; throw 'docker start failed.' }
+
+$length = if ($Duration) { "$Duration s" } else { 'until Ctrl+C' }
+Write-Host "Recording $Url at ${Width}x${Height} ${Fps} fps, $length"
+
+function Format-Time([int] $seconds) {
+    '{0:00}:{1:00}' -f [math]::Floor($seconds / 60), ($seconds % 60)
+}
+
+function Format-Size([long] $bytes) {
+    if ($bytes -ge 1GB) { '{0:N2} GB' -f ($bytes / 1GB) }
+    elseif ($bytes -ge 1MB) { '{0:N1} MB' -f ($bytes / 1MB) }
+    else { '{0:N0} KB' -f ($bytes / 1KB) }
+}
+
+# Runs in a throwaway container fed by `docker cp`, because bind mounts are not
+# reliable on every Docker Desktop setup.
+function Compress-Recording([string] $source, [string] $target) {
+    $encName = "$name-x265"
+    $script = 'ffprobe -v error -show_entries format=duration -of default=nw=1 /tmp/in.mp4 && ' +
+        'ffmpeg -hide_banner -v error -nostats -progress pipe:1 -y -i /tmp/in.mp4 -map 0 ' +
+        "-c:v libx265 -preset $Preset -crf $Crf -tag:v hvc1 -x265-params log-level=error " +
+        '-c:a copy -movflags +faststart /tmp/out.mp4'
+    docker create --name $encName --entrypoint sh $Image -c $script | Out-Null
+    if ($LASTEXITCODE -ne 0) { return $false }
+    try {
+        docker cp $source "${encName}:/tmp/in.mp4" *> $null
+        if ($LASTEXITCODE -ne 0) { return $false }
+
+        $total = 0.0
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        docker start -a $encName 2>$null | ForEach-Object {
+            if ($_ -match '^duration=([\d.]+)') { $total = [double]$Matches[1] }
+            elseif ($_ -match '^out_time_us=(\d+)' -and $total -gt 0) {
+                $done = [math]::Min([double]$Matches[1] / 1e6, $total)
+                $pct = $done / $total
+                $eta = if ($pct -gt 0.01) { Format-Time ($clock.Elapsed.TotalSeconds * (1 - $pct) / $pct) } else { '--:--' }
+                $line = "  H.265 $(Format-Time $done) / $(Format-Time $total)  ({0:P0}, ETA $eta)" -f $pct
+                Write-Host -NoNewline ("`r" + $line.PadRight(60))
+            }
+        }
+        if ((docker inspect -f '{{.State.ExitCode}}' $encName) -ne '0') { Write-Host ''; return $false }
+        Write-Host ("`r" + "  H.265 $(Format-Time $total) / $(Format-Time $total)  (100%)".PadRight(60))
+
+        docker cp "${encName}:/tmp/out.mp4" $target *> $null
+        return $LASTEXITCODE -eq 0
+    }
+    finally {
+        docker rm -f -v $encName *> $null
+    }
+}
+
+# The copy-out lives in `finally` so that Ctrl+C, which ends the wait loop,
+# still stops the recorder cleanly and saves what was recorded so far.
+$startedAt = $null
+$setup = [Diagnostics.Stopwatch]::StartNew()
+try {
+    while ((docker inspect -f '{{.State.Running}}' $name) -eq 'true') {
+        # The markers are on the container's stdout; its stderr is only noise.
+        if (-not $startedAt -and (docker logs $name 2>$null | Select-String -SimpleMatch 'recording started' -Quiet)) {
+            $startedAt = Get-Date
+        }
+        $line = if (-not $startedAt) {
+            "  Preparing page... $(Format-Time $setup.Elapsed.TotalSeconds)"
+        }
+        else {
+            $elapsed = [int]((Get-Date) - $startedAt).TotalSeconds
+            if ($Duration) {
+                $elapsed = [math]::Min($elapsed, $Duration)
+                "  REC $(Format-Time $elapsed) / $(Format-Time $Duration)  ($(Format-Time ($Duration - $elapsed)) left)"
+            }
+            else {
+                "  REC $(Format-Time $elapsed)  (Ctrl+C to stop)"
+            }
+        }
+        Write-Host -NoNewline ("`r" + $line.PadRight(60))
+        Start-Sleep -Milliseconds 500
+    }
+}
+finally {
+    # The timer starts on a polled log line, so it can trail ffmpeg by up to a
+    # poll interval; a completed timed recording did record the full length.
+    $finished = (docker inspect -f '{{.State.Running}} {{.State.ExitCode}}' $name) -eq 'false 0'
+    if ($finished -and $startedAt -and $Duration) {
+        Write-Host -NoNewline ("`r" + "  REC $(Format-Time $Duration) / $(Format-Time $Duration)  (00:00 left)".PadRight(60))
+    }
+    Write-Host ''
+    # Generous timeout: after a stop the container still trims the file's end.
+    docker stop -t 120 $name *> $null
+    docker logs $name 2>$null | Where-Object { "$_" -like 'browse: *' } | ForEach-Object { Write-Host "  $_" }
+    $exitCode = [int](docker inspect -f '{{.State.ExitCode}}' $name)
+    docker cp "${name}:/out/recording.mp4" $Output *> $null
+    $copied = $LASTEXITCODE -eq 0
+    if (-not $copied -or $exitCode -ne 0) {
+        Write-Host 'Container log:'
+        docker logs --tail 30 $name 2>&1 | ForEach-Object { Write-Host "  $_" }
+    }
+    docker rm -v $name *> $null
+
+    if ($copied) {
+        Write-Host "Saved $Output ($(Format-Size (Get-Item $Output).Length))"
+    }
+    else {
+        Write-Error 'No recording was produced (stopped during warmup, or the recorder failed).'
+    }
+}
+if (-not $copied) { exit 1 }
+
+if ($copied -and $Compress) {
+    $original = [IO.Path]::ChangeExtension($Output, '.h264.mp4')
+    Move-Item -Force $Output $original
+    Write-Host "Compressing to H.265 (preset $Preset, crf $Crf)..."
+    $kept = $false
+    # `finally` because Ctrl+C skips any else-branch: the H.264 recording must
+    # end up back under the requested name whenever no better file replaced it.
+    try {
+        if (Compress-Recording $original $Output) {
+            $before = (Get-Item $original).Length
+            $after = (Get-Item $Output).Length
+            if ($after -lt $before) {
+                Write-Host ("Saved $Output ($(Format-Size $after), {0:P0} smaller)" -f (1 - $after / $before))
+                $kept = $true
+                if ($KeepOriginal) { Write-Host "Kept original $original" } else { Remove-Item $original }
+            }
+            else {
+                Write-Host "H.265 came out bigger ($(Format-Size $after)); keeping the H.264 recording."
+            }
+        }
+        else {
+            Write-Error 'Compression failed; keeping the H.264 recording.'
+        }
+    }
+    finally {
+        if (-not $kept) {
+            Remove-Item $Output -ErrorAction SilentlyContinue
+            Move-Item -Force $original $Output
+            Write-Host "Saved $Output ($(Format-Size (Get-Item $Output).Length))"
+        }
+    }
+}
