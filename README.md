@@ -6,6 +6,7 @@
 ![PowerShell](https://img.shields.io/badge/wrapper-PowerShell-5391FE?logo=powershell&logoColor=white)
 ![Chrome](https://img.shields.io/badge/browser-Chrome%20kiosk-4285F4?logo=googlechrome&logoColor=white)
 ![ffmpeg](https://img.shields.io/badge/encoder-ffmpeg-007808?logo=ffmpeg&logoColor=white)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
 
 ```powershell
 .\record.ps1 https://www.youtube.com/watch?v=... -DurationMin 90 -Title "Interview"
@@ -29,6 +30,7 @@ It records a live stream, a TV player, a YouTube video or a dashboard, and you c
 - [Output](#output)
 - [Known limits](#known-limits)
 - [Troubleshooting](#troubleshooting)
+- [License](#license)
 
 ## Features
 
@@ -302,3 +304,7 @@ docker rm tmp
 | The first seconds show the page, not the video | Expected: the play and fullscreen clicks happen on camera |
 | `No recording was produced` | You stopped during warm-up, or the recorder failed. The last 30 log lines are printed |
 | Changes to `browse.py` or `entrypoint.sh` don't apply | Add `-Build` |
+
+## License
+
+[MIT](LICENSE) © 2026 Szymon Roziewski. Google Chrome, ffmpeg and the other packages installed into the Docker image keep their own licenses.
