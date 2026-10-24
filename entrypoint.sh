@@ -79,9 +79,17 @@ sleep "$WARMUP" & wait $! || true
 # ffmpeg's AAC encoder low-passes by default and then never spends more than
 # about 225 kbit/s whatever is asked; with a 20 kHz cutoff 256 really gives
 # ~256 (measured on pink noise), and the top octave Spotify keeps survives.
+# An MP3 stream is itself playable when cut off, so it is captured as the
+# final format and only renamed at the end.
 if [[ ${AUDIO_ONLY:-0} == 1 ]]; then
   [[ ${OUT##*/} == *.* ]] && base=${OUT%.*} || base=$OUT
-  capture=$base.audio.aac
+  if [[ ${AUDIO_FORMAT:-m4a} == mp3 ]]; then
+    capture=$base.audio.mp3
+    encode=(-c:a libmp3lame -b:a "${AUDIO_BITRATE}k" -flush_packets 1 -f mp3)
+  else
+    capture=$base.audio.aac
+    encode=(-c:a aac -b:a "${AUDIO_BITRATE}k" -cutoff 20000 -flush_packets 1 -f adts)
+  fi
   limit=()
   [[ -n "$DURATION" ]] && limit=(-t "$DURATION")
   # Written by `browse.py open` from a Spotify album's or playlist's track list.
@@ -98,7 +106,7 @@ if [[ ${AUDIO_ONLY:-0} == 1 ]]; then
   rm -f "$OUT"
   ffmpeg -hide_banner -loglevel warning -y \
     "${limit[@]}" -f pulse -sample_rate 44100 -channels 2 -i rec.monitor \
-    -c:a aac -b:a "${AUDIO_BITRATE}k" -cutoff 20000 -flush_packets 1 -f adts "$capture" </dev/null &
+    "${encode[@]}" "$capture" </dev/null &
   ffmpeg_pids+=($!)
   (( stop )) && stop_capture
   echo "recording started"
@@ -110,7 +118,16 @@ if [[ ${AUDIO_ONLY:-0} == 1 ]]; then
     [[ -n "${pid:-}" ]] && break  # an interrupted wait unsets it
   done
   (( code == 255 )) && code=0
-  if [[ -s "$capture" ]] \
+  if [[ ${AUDIO_FORMAT:-m4a} == mp3 ]]; then
+    # Header-only below 8 KB (~1.1 KB at 320k); record.ps1 uses the same
+    # limit for a capture it rescues.
+    if (( $(stat -c %s "$capture" 2>/dev/null || echo 0) > 8192 )); then
+      mv "$capture" "$OUT" || code=1
+    else
+      echo "the mp3 capture holds no sound" >&2
+      code=1
+    fi
+  elif [[ -s "$capture" ]] \
      && ffmpeg -hide_banner -loglevel error -y -i "$capture" -c copy -movflags +faststart -f ipod "$OUT.part.m4a" \
      && [[ -s "$OUT.part.m4a" ]]; then
     { mv "$OUT.part.m4a" "$OUT" && rm -f "$capture"; } || code=1

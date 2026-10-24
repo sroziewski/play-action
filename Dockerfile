@@ -38,7 +38,8 @@ ENV URL=https://example.com \
     COOKIE_BANNER=reject \
     OUT=/out/recording.mp4 \
     AUDIO_ONLY=0 \
-    AUDIO_BITRATE=256
+    AUDIO_BITRATE=256 \
+    AUDIO_FORMAT=m4a
 
 VOLUME /out
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

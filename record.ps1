@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
 Records a web page in full-screen Chrome to an MP4 (or, with -Audio, its sound
-to an .m4a) on this machine.
+to an .m4a or .mp3) on this machine.
 
 .DESCRIPTION
 Runs the chrome-rec image, then copies the finished video out of the container
@@ -102,14 +102,24 @@ param(
     # Rebuild the image even if it already exists.
     [switch] $Build,
 
-    # Record the page's sound only, to an AAC .m4a; presses Spotify's play
+    # Record the page's sound only, to an .m4a or .mp3; presses Spotify's play
     # button instead of going fullscreen.
     [switch] $Audio,
 
-    # AAC bitrate in kbit/s for -Audio. No 320: ffmpeg's AAC encoder spends
-    # at most ~265 kbit/s on 44.1 kHz stereo, so it would be 256 in disguise.
-    [ValidateSet(128, 160, 192, 224, 256)]
-    [int] $AudioBitrate = 256,
+    # Bitrate in kbit/s for -Audio; default 256 for m4a, 320 for mp3. 320 is
+    # mp3 only: ffmpeg's AAC encoder spends at most ~265 kbit/s on 44.1 kHz
+    # stereo, so it would be 256 in disguise.
+    [ValidateSet(128, 160, 192, 224, 256, 320)]
+    [int] $AudioBitrate,
+
+    # File format for -Audio: m4a (AAC) or mp3.
+    [ValidateSet('m4a', 'mp3')]
+    [string] $AudioFormat = 'm4a',
+
+    # Only check the options and exit: deploy-play-action.ps1 runs this
+    # locally, so a bad combination fails before anything starts remotely.
+    [Parameter(DontShow, ParameterSetName = 'Record')]
+    [switch] $ValidateOnly,
 
     # Print the full usage guide and exit.
     [Parameter(Mandatory, ParameterSetName = 'Help')]
@@ -120,7 +130,7 @@ param(
 if ($Help) {
     Write-Host @'
 record.ps1 - records a web page in full-screen Chrome, with sound, to an MP4
-             (or only its sound to an .m4a, see AUDIO ONLY)
+             (or only its sound to an .m4a or .mp3, see AUDIO ONLY)
 
 USAGE
   .\record.ps1 <Url> [options]
@@ -167,28 +177,33 @@ PAGE HANDLING
                       (YouTube and pages with a .play-action player).
 
 AUDIO ONLY
-  -Audio              Record only the page's sound, to <name>.m4a (AAC,
-                      44.1 kHz stereo). Nothing goes fullscreen; -Width,
-                      -Height, -Fps and -KeepPage don't matter. After the
-                      page loads, Spotify's play button is pressed: the
+  -Audio              Record only the page's sound, to <name>.m4a (AAC) or
+                      <name>.mp3, 44.1 kHz stereo. Nothing goes
+                      fullscreen; -Width, -Height, -Fps and -KeepPage
+                      don't matter. After the page loads, Spotify's
+                      play button is pressed: the
                       album/playlist page's own big button, else the
                       bottom-bar play/pause toggle; never one that already
                       reads "Pauza"/"Pause" (= playing). Other pages: a
                       .play-action button; YouTube simply plays.
                       Recording starts just before the click, so the file
                       opens with a moment of silence.
-  -AudioBitrate <k>   AAC bitrate in kbit/s: 128, 160, 192, 224 or 256
-                      (default). Spotify's web player streams at most AAC
-                      256 (Premium; 128 on Free), so 256 is the useful top;
-                      use 128 for spoken word or a Free account.
+  -AudioFormat <f>    m4a (default): AAC, the codec Spotify streams, so the
+                      smallest file for the same quality. mp3: plays on
+                      anything (old players, car radios), constant bitrate.
+  -AudioBitrate <k>   Bitrate in kbit/s: 128, 160, 192, 224, 256, and 320
+                      for mp3 only. Default 256 for m4a, 320 for mp3.
+                      Spotify's web player streams at most AAC 256 (Premium;
+                      128 on Free); use 128 for spoken word or Free.
   Length: without -Duration/-DurationMin on a Spotify album or playlist,
   the track list's times are added up (+5 s, +0.25 s per track), shuffle
   and repeat are switched off and playback starts from the first track, so
   the file holds exactly the album. Elsewhere it records until Ctrl+C;
   Ctrl+C always stops early.
   Works with -Duration/-DurationMin, -Cookies, -CookieBanner, -Title, -Dir
-  and -Output (an .m4a name); not with -Compress or -KeepOriginal. Spotify needs a login:
-  pass your exported cookies with -Cookies.
+  and -Output (named .m4a or .mp3 to match); not with -Compress or
+  -KeepOriginal. Spotify needs a login: pass your exported cookies with
+  -Cookies.
 
 COMPRESSION (runs after recording)
   -Compress           Re-encode to H.265: usually 30-45% smaller, but takes
@@ -268,10 +283,14 @@ if ($PSBoundParameters.ContainsKey('DurationMin')) {
 if ($Audio -and ($Compress -or $KeepOriginal)) {
     throw '-Compress and -KeepOriginal re-encode video; they do not apply to -Audio.'
 }
-if (-not $Audio -and $PSBoundParameters.ContainsKey('AudioBitrate')) {
-    throw '-AudioBitrate only applies together with -Audio.'
+foreach ($p in 'AudioBitrate', 'AudioFormat') {
+    if (-not $Audio -and $PSBoundParameters.ContainsKey($p)) { throw "-$p only applies together with -Audio." }
 }
-$ext = if ($Audio) { '.m4a' } else { '.mp4' }
+if (-not $AudioBitrate) { $AudioBitrate = if ($AudioFormat -eq 'mp3') { 320 } else { 256 } }
+if ($AudioFormat -eq 'm4a' -and $AudioBitrate -gt 256) {
+    throw "AAC (m4a) goes up to 256 kbit/s here; use -AudioBitrate 256, or -AudioFormat mp3 for 320."
+}
+$ext = if ($Audio) { ".$AudioFormat" } else { '.mp4' }
 
 # libx264 with yuv420p rejects odd frame sizes.
 if ($Width % 2 -or $Height % 2) {
@@ -289,19 +308,54 @@ if (-not $Output) {
     $file = if ($Title) { "$Title$ext" } else { "recording-$runId$ext" }
     $Output = Join-Path $Dir $file
 }
-elseif ($Audio -and [IO.Path]::GetExtension($Output) -ne '.m4a') {
-    throw "-Audio saves an .m4a file; give -Output a .m4a name (got $Output)."
+elseif ($Audio -and [IO.Path]::GetExtension($Output) -ne $ext) {
+    throw "-Audio -AudioFormat $AudioFormat saves an $ext file; give -Output an $ext name (got $Output)."
 }
-$Output =$ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)
+if ($ValidateOnly) { exit 0 }
+$Output = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)
 New-Item -ItemType Directory -Force (Split-Path $Output) -ErrorAction Stop | Out-Null
 
 $imageEnv = docker image inspect -f '{{json .Config.Env}}' $Image 2> $null
 $missing = $LASTEXITCODE -ne 0
-# An image built before audio-only mode existed would quietly record video.
-$outdated = $Audio -and -not $missing -and "$imageEnv" -notmatch '"AUDIO_ONLY='
+# An image built before audio-only mode existed would quietly record video,
+# one built before mp3 support an .m4a under the .mp3 name.
+$outdated = $Audio -and -not $missing -and ("$imageEnv" -notmatch '"AUDIO_ONLY=' -or
+    ($AudioFormat -eq 'mp3' -and "$imageEnv" -notmatch '"AUDIO_FORMAT='))
 if ($Build -or $missing -or $outdated) {
     Write-Host "Building image $Image..."
-    docker build -t $Image $PSScriptRoot
+    # deploy-play-action.ps1 compares this label with the server's checkout
+    # to tell whether a pulled change needs a rebuild.
+    $label = @()
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        $rev = git -C $PSScriptRoot log -1 --format=%H -- Dockerfile browse.py entrypoint.sh 2> $null
+        if ($LASTEXITCODE -eq 0 -and $rev) { $label = '--label', "play-action.rev=$rev" }
+    }
+    # Set by deploy-play-action.ps1 when the image is old: the cache would
+    # hand back the same Chrome layer, so the base image and every step are
+    # fetched again.
+    $refresh = $env:PLAY_ACTION_REFRESH -eq '1'
+    $built = docker image inspect -f '{{index .Config.Labels "play-action.rev"}}' $Image 2> $null
+    docker build -t $Image @label @(if ($refresh) { '--pull', '--no-cache' }) $PSScriptRoot
+    # --pull needs the registry, and a working image beats no recording; the
+    # next run tries the refresh again. The existing image only counts when
+    # it holds this code, else a cached build brings the code in (the
+    # changed layers are only the copied scripts).
+    if ($LASTEXITCODE -ne 0 -and $refresh -and -not $missing -and -not $outdated) {
+        if ($rev -and $built -eq $rev) {
+            Write-Warning 'Refreshing the image failed; recording with the existing one.'
+            $global:LASTEXITCODE = 0
+        }
+        else {
+            Write-Warning 'Refreshing the image failed; building it from the cache instead.'
+            docker build -t $Image @label $PSScriptRoot
+            # Offline even the cached build fails: Docker looks the FROM image
+            # up in the registry, and builds don't keep it under its name.
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning 'That failed too; recording with the existing image, which was built from older code.'
+                $global:LASTEXITCODE = 0
+            }
+        }
+    }
     if ($LASTEXITCODE -ne 0) { throw 'docker build failed.' }
 }
 
@@ -315,7 +369,8 @@ $runArgs = @(
     '-e', "COOKIE_BANNER=$CookieBanner"
 )
 if ($Audio) {
-    $runArgs += '-e', 'AUDIO_ONLY=1', '-e', "AUDIO_BITRATE=$AudioBitrate", '-e', 'OUT=/out/recording.m4a'
+    $runArgs += '-e', 'AUDIO_ONLY=1', '-e', "AUDIO_BITRATE=$AudioBitrate", '-e', "AUDIO_FORMAT=$AudioFormat",
+        '-e', "OUT=/out/recording$ext"
 }
 if ($Duration) { $runArgs += '-e', "DURATION=$Duration" }
 if ($Cookies) { $runArgs += '-e', 'COOKIES=/tmp/cookies.txt' }
@@ -335,7 +390,8 @@ $length = if ($Duration) { "$Duration s" }
     elseif ($Audio -and $Url -match '^https?://open\.spotify\.com/(intl-[a-z-]+/)?(album|playlist)/') { 'as long as the album/playlist (else until Ctrl+C)' }
     else { 'until Ctrl+C' }
 if ($Audio) {
-    Write-Host "Recording the sound of $Url as AAC $AudioBitrate kbit/s, $length"
+    $codec = if ($AudioFormat -eq 'mp3') { 'MP3' } else { 'AAC' }
+    Write-Host "Recording the sound of $Url as $codec $AudioBitrate kbit/s, $length"
 }
 else {
     Write-Host "Recording $Url at ${Width}x${Height} ${Fps} fps, $length"
@@ -443,10 +499,24 @@ finally {
     docker cp "${name}:/out/recording$ext" $Output *> $null
     $copied = $LASTEXITCODE -eq 0
     if ($Audio -and -not $copied) {
-        # The raw capture survives a failed repackaging; it plays in most players.
-        $raw = [IO.Path]::ChangeExtension($Output, '.aac')
-        docker cp "${name}:/out/recording.audio.aac" $raw *> $null
-        if ($LASTEXITCODE -eq 0) { Write-Host "Kept the unprocessed capture as $raw" }
+        if ($AudioFormat -eq 'mp3') {
+            # The mp3 capture already is the final file, only not renamed.
+            # Through a temp name: a recording already saved under $Output
+            # must survive a capture that turns out empty.
+            $part = "$Output.part"
+            docker cp "${name}:/out/recording.audio.mp3" $part *> $null
+            # An empty or header-only capture is no recording; the header
+            # alone is ~1.1 KB at 320 kbit/s, 8 KB is 0.2-0.5 s of sound.
+            $copied = $LASTEXITCODE -eq 0 -and (Get-Item -LiteralPath $part).Length -gt 8KB
+            if ($copied) { Move-Item -LiteralPath $part $Output -Force }
+            Remove-Item -LiteralPath $part -ErrorAction SilentlyContinue
+        }
+        else {
+            # The raw capture survives a failed repackaging; it plays in most players.
+            $raw = [IO.Path]::ChangeExtension($Output, '.aac')
+            docker cp "${name}:/out/recording.audio.aac" $raw *> $null
+            if ($LASTEXITCODE -eq 0) { Write-Host "Kept the unprocessed capture as $raw" }
+        }
     }
     if (-not $copied -or $exitCode -ne 0) {
         Write-Host 'Container log:'
@@ -455,7 +525,7 @@ finally {
     docker rm -v $name *> $null
 
     if ($copied) {
-        Write-Host "Saved $Output ($(Format-Size (Get-Item $Output).Length))"
+        Write-Host "Saved $Output ($(Format-Size (Get-Item -LiteralPath $Output).Length))"
     }
     else {
         Write-Error 'No recording was produced (stopped during warmup, or the recorder failed).'
@@ -465,19 +535,19 @@ if (-not $copied) { exit 1 }
 
 if ($copied -and $Compress) {
     $original = [IO.Path]::ChangeExtension($Output, '.h264.mp4')
-    Move-Item -Force $Output $original
+    Move-Item -Force -LiteralPath $Output $original
     Write-Host "Compressing to H.265 (preset $Preset, crf $Crf)..."
     $kept = $false
     # `finally` because Ctrl+C skips any else-branch: the H.264 recording must
     # end up back under the requested name whenever no better file replaced it.
     try {
         if (Compress-Recording $original $Output) {
-            $before = (Get-Item $original).Length
-            $after = (Get-Item $Output).Length
+            $before = (Get-Item -LiteralPath $original).Length
+            $after = (Get-Item -LiteralPath $Output).Length
             if ($after -lt $before) {
                 Write-Host ("Saved $Output ($(Format-Size $after), {0:P0} smaller)" -f (1 - $after / $before))
                 $kept = $true
-                if ($KeepOriginal) { Write-Host "Kept original $original" } else { Remove-Item $original }
+                if ($KeepOriginal) { Write-Host "Kept original $original" } else { Remove-Item -LiteralPath $original }
             }
             else {
                 Write-Host "H.265 came out bigger ($(Format-Size $after)); keeping the H.264 recording."
@@ -489,9 +559,10 @@ if ($copied -and $Compress) {
     }
     finally {
         if (-not $kept) {
-            Remove-Item $Output -ErrorAction SilentlyContinue
-            Move-Item -Force $original $Output
-            Write-Host "Saved $Output ($(Format-Size (Get-Item $Output).Length))"
+            Remove-Item -LiteralPath $Output -ErrorAction SilentlyContinue
+            Move-Item -Force -LiteralPath $original $Output
+            Write-Host ''
+            Write-Host "Saved $Output ($(Format-Size (Get-Item -LiteralPath $Output).Length))"
         }
     }
 }

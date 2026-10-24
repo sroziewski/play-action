@@ -27,6 +27,7 @@ It records a live stream, a TV player, a YouTube video or a dashboard, and you c
 - [Logged-in pages](#logged-in-pages--cookies)
 - [File size and compression](#file-size-and-compression)
 - [How it works](#how-it-works)
+- [Recording on a remote server](#recording-on-a-remote-server)
 - [Using the image directly](#using-the-image-directly-docker)
 - [Output](#output)
 - [Known limits](#known-limits)
@@ -127,8 +128,9 @@ An existing file of the same name is overwritten.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `-Audio` | off | Record only the sound, to `<name>.m4a` ([details](#audio-only--audio)) |
-| `-AudioBitrate <k>` | `256` | AAC bitrate in kbit/s: `128`, `160`, `192`, `224` or `256`. Only with `-Audio` |
+| `-Audio` | off | Record only the sound, to `<name>.m4a` or `<name>.mp3` ([details](#audio-only--audio)) |
+| `-AudioFormat <f>` | `m4a` | `m4a` (AAC) or `mp3`. Only with `-Audio` |
+| `-AudioBitrate <k>` | `256` (m4a), `320` (mp3) | Bitrate in kbit/s: `128`, `160`, `192`, `224`, `256`, and `320` for mp3 only. Only with `-Audio` |
 
 ### Docker
 
@@ -210,11 +212,11 @@ This happens on camera, so the first seconds show the page and Chrome's "press E
 
 | | |
 |---|---|
-| Format | AAC-LC in `.m4a`, 44.1 kHz stereo (Spotify's own sample rate, so nothing is resampled) |
-| Bitrate | 256 kbit/s by default (about 1.9 MB per minute); `-AudioBitrate` 128–256 |
+| Format | AAC-LC in `.m4a` (default) or MP3 (`-AudioFormat mp3`, LAME, constant bitrate), 44.1 kHz stereo (Spotify's own sample rate, so nothing is resampled) |
+| Bitrate | m4a: 256 kbit/s by default (about 1.9 MB per minute), `-AudioBitrate` 128–256. mp3: 320 kbit/s by default (about 2.4 MB per minute), 128–320 |
 | Length | **Automatic on a Spotify album or playlist**: the track list's times added up, see below. Otherwise `-Duration` / `-DurationMin`, or until Ctrl+C. Stopping keeps everything so far |
-| Not with | `-Compress`, `-KeepOriginal` (they re-encode video). `-Output` must end in `.m4a` |
-| If saving fails | The raw capture is kept next to it as `<name>.aac` |
+| Not with | `-Compress`, `-KeepOriginal` (they re-encode video). `-Output` must end in `.m4a`, or `.mp3` with `-AudioFormat mp3` |
+| If saving fails | m4a: the raw capture is kept next to it as `<name>.aac`. mp3: the capture is already the final file and is saved as such |
 
 **Automatic length.** On an album or playlist page, without `-Duration`/`-DurationMin`, the tool records exactly the album:
 - **Total:** it scrolls through the whole track list (Spotify only renders the rows on screen) and adds up every track's time. It only trusts the sum when it has read as many tracks as the list says it has.
@@ -224,7 +226,12 @@ This happens on camera, so the first seconds show the page and Chrome's "press E
 - **Countdown:** the status line counts down (`REC 01:12 / 54:23`), and the log says `track list: 24 tracks, 54:12; recording 54:23 from the first track`.
 - **Fallback:** if no complete list is found (track, artist and podcast pages, or another site), it records until Ctrl+C as before. Ctrl+C or an explicit `-Duration` always takes precedence.
 
-**Why 256 kbit/s:** Spotify's web player streams AAC at up to 256 kbit/s on Premium and 128 on Free, and it can't be set higher. 256 keeps everything the stream carries. There is no 320, because the encoder in the image (ffmpeg's own AAC) spends at most about 265 kbit/s on 44.1 kHz stereo. Use 128 for spoken word or a Free account.
+**Which format:** `m4a` keeps Spotify's own codec, AAC, so it is the smaller file for the same quality. `mp3` plays on anything, including old players and car radios.
+
+**Why these bitrates:** Spotify's web player streams AAC at up to 256 kbit/s on Premium and 128 on Free, and it can't be set higher.
+- **m4a:** 256 keeps everything the stream carries. There is no 320 for m4a, because the image's AAC encoder (ffmpeg's own) spends at most about 265 kbit/s on 44.1 kHz stereo.
+- **mp3:** MP3 is a less efficient codec than AAC and the audio is re-encoded from it, so its default is 320, which LAME really delivers.
+- **Spoken word or a Free account:** 128 is enough.
 
 **Spotify notes:**
 - **Login:** you have to be logged in. Export your cookies from open.spotify.com (the login cookie is `sp_dc`) and pass them with `-Cookies`.
@@ -286,6 +293,76 @@ flowchart LR
 
 Picture and sound are deliberately recorded by separate processes. In a single ffmpeg process the screen grab paused whenever sound arrived late (at the start and while the page was silent), and the video repeated frames, dropping as low as 3 new frames per second.
 
+## Recording on a remote server
+
+`deploy-play-action.ps1` runs the same recording on a Linux server over SSH. It takes every option of `record.ps1`, with the same names and checks, plus the connection:
+
+```powershell
+.\deploy-play-action.ps1 https://example.com/... -Audio -Cookies .\cookies.txt -Ip 203.0.113.7 -User me -Key ~\.ssh\id_ed25519 -Port 22
+```
+
+| Option | Meaning |
+|---|---|
+| `-Ip`, `-User`, `-Key`, `-Port` | **Required.** Server address, login, private key file, SSH port |
+| `-Setup` | Install what's missing on an **Ubuntu** server first (needs passwordless sudo), see below. Alone or together with a recording |
+| `-Detach` | Start and return at once |
+| `-Attach` | Follow the latest recording again, and download it when it ends |
+| `-Stop` | End the latest recording early, as Ctrl+C would; what was recorded is still saved and downloaded |
+| `-Run <id>` | With `-Attach`/`-Stop`: that recording instead of the latest (the id is printed when it starts) |
+| `-NoDownload` | Leave the finished file on the server only |
+| `-LocalDir <folder>` | Where downloads go (default `.\recordings`) |
+| `-RemoteDir <path>` | Folder on the server (default `play-action` in the login's home) |
+| `-Repo <url>` | Repository to clone on the server (default this public one) |
+| `-MaxImageAgeDays <n>` | Rebuild the server's Docker image once it is older (default 30) |
+
+**First time on a fresh Ubuntu server**, install everything once:
+
+```powershell
+.\deploy-play-action.ps1 -Setup -Ip 203.0.113.7 -User me -Key ~\.ssh\id_ed25519 -Port 22
+```
+
+`-Setup` runs `sudo -n`, so it needs a login with passwordless sudo, and it only installs what is missing:
+- **Packages:** git, screen and curl.
+- **Docker CE** from Docker's own repository. A snap Docker is removed first, because it is sandboxed and can't build or copy files in most folders.
+- **PowerShell 7** from Microsoft's repository.
+- **Docker access:** your login is added to the `docker` group.
+- **Keeping recordings alive through upgrades:** unattended upgrades skip Docker, needrestart doesn't restart containerd, and Docker's `live-restore` keeps containers running across a patch-level daemon restart. An upgrade of Docker would otherwise restart every container and end a running recording.
+
+What every run does:
+1. **Checks the server:** Linux x86_64, git, and Docker usable by the login.
+2. **Sets it up:** clones this repository into `~/play-action` on the first run and pulls updates afterwards. If the server has no PowerShell, it fetches a portable PowerShell 7 into `~/.play-action`, without sudo.
+3. **Checks the disk:** it refuses to start with less than 3 GB free, or 5 GB when the image has to be built, both where recordings are saved and in Docker's storage.
+4. **Keeps the image current:** it rebuilds the Docker image when the pulled code changed it, or when it is older than 30 days. Chrome and its DRM module need updates to keep playing Spotify.
+5. **Uploads the `-Cookies` file** into a private folder (`~/.play-action/cookies`). The file is deleted again when the recording ends, and leftovers older than a day are purged.
+6. **Starts `record.ps1`** in a `screen` session named `play-action-<id>`:
+   - The recording keeps running if your connection drops.
+   - To watch it on the server: SSH in, run `screen -r play-action-<id>`, and detach again with Ctrl+A, D.
+   - The session closes by itself once the file is saved. The file stays in the server's `recordings` folder, or wherever `-Dir`/`-Output` point.
+   - Without `screen` on the server, it runs as a plain background process.
+7. **Follows the progress** in your terminal and **downloads the file** when it's done. Ctrl+C here only stops following and prints how to resume.
+
+**If the connection drops**, or you stopped following, the recording carries on on the server. The script prints the recording's id; use it to follow again and download the file. That works while it is still recording and after it has finished:
+
+```powershell
+.\deploy-play-action.ps1 -Attach -Run 20261024-115546-31e7 -Ip 203.0.113.7 -User me -Key ~\.ssh\id_ed25519 -Port 22
+```
+
+To end it early, for example when the film is over before `-Duration` runs out (what was recorded is saved and downloaded):
+
+```powershell
+.\deploy-play-action.ps1 -Stop -Run 20261024-115546-31e7 -Ip 203.0.113.7 -User me -Key ~\.ssh\id_ed25519 -Port 22
+```
+
+Without `-Run`, both act on the latest recording.
+
+Notes:
+- **Server requirements:** your login must be allowed to use Docker; `-Setup` handles that, otherwise run `sudo usermod -aG docker <login>`. The first run builds the Docker image, which takes a few minutes.
+- **Where the server is matters:** a datacenter IP in another country can make Spotify ask you to log in again or hide region-locked albums, and YouTube shows its "confirm you're not a bot" page more often to such IPs.
+- **Paths:** `-Dir` and `-Output` name paths on the server, relative to its `play-action` folder.
+- **Code version:** the server runs the code **pushed to GitHub**, not your local edits.
+- **Host key:** it is trusted the first time you connect (`StrictHostKeyChecking=accept-new`).
+- **Key permissions:** if ssh says the key file's permissions are too open, the script prints the `icacls` command that fixes them.
+
 ## Using the image directly (`docker`)
 
 ```sh
@@ -331,15 +408,16 @@ docker rm tmp
 | `COOKIE_BANNER` | `reject` | `reject`, `accept` or `keep` |
 | `COOKIES` | *(empty)* | Path of a cookies file inside the container |
 | `OUT` | `/out/recording.mp4` | Output file inside the container, overwritten on each run |
-| `AUDIO_ONLY` | `0` | `1` records only the sound (AAC in `.m4a`; set `OUT` to a `.m4a` name) |
-| `AUDIO_BITRATE` | `256` | AAC bitrate in kbit/s for `AUDIO_ONLY=1` |
+| `AUDIO_ONLY` | `0` | `1` records only the sound (see `AUDIO_FORMAT`; name `OUT` to match) |
+| `AUDIO_BITRATE` | `256` | Bitrate in kbit/s for `AUDIO_ONLY=1` |
+| `AUDIO_FORMAT` | `m4a` | `m4a` (AAC) or `mp3`; name `OUT` to match |
 
 ## Output
 
 - H.264 video (libx264 `veryfast`, CRF 23) and AAC 128 kbit/s audio. The recorder writes a fragmented MP4; `-Compress` output is a regular MP4 with the index at the front.
 - The audio track is there even when the page is silent.
 - Page sound plays automatically; no click is needed.
-- With `-Audio`: an `.m4a` with AAC audio only, see [Audio only](#audio-only--audio).
+- With `-Audio`: an `.m4a` (AAC) or `.mp3` with the sound only, see [Audio only](#audio-only--audio).
 - The mouse pointer is not recorded.
 
 ## Known limits
