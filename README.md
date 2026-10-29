@@ -43,7 +43,7 @@ It records a live stream, a TV player, a YouTube video or a dashboard, and you c
 - 🔐 **Logged-in recording:** it can use cookies exported from your own browser.
 - ⏱️ **Timed or open-ended:** `-Duration` (seconds), `-DurationMin` (minutes), or record until Ctrl+C. Stopping early keeps everything recorded so far.
 - 🎧 **Audio only:** `-Audio` saves just the sound as AAC 256 kbit/s `.m4a`, pressing Spotify's play button for you.
-- 🗜️ **Optional H.265:** `-Compress` makes the file 30–45 % smaller.
+- 🗜️ **H.265 by default:** each video is re-encoded after recording, 30–45 % smaller; `-NoCompress` skips it.
 - 🧹 **Nothing left behind:** each run uses a fresh container, which is removed afterwards.
 
 ## Requirements
@@ -119,7 +119,7 @@ An existing file of the same name is overwritten.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `-Compress` | off | After recording, re-encode to H.265 |
+| `-NoCompress` | off | Skip the H.265 pass and keep the H.264 recording. Video is compressed by default; `-Compress` is still accepted |
 | `-Crf <0-51>` | `26` | H.265 quality: lower means better and bigger. 28 is fine for talking heads |
 | `-Preset <name>` | `medium` | `ultrafast` … `veryslow`. Slower presets give smaller files |
 | `-KeepOriginal` | off | Also keep the H.264 file as `<name>.h264.mp4` |
@@ -145,8 +145,8 @@ An existing file of the same name is overwritten.
 # One hour of a 50 fps TV stream, with a readable file name, into D:\videos\tv
 .\record.ps1 https://tv.example/live -Fps 50 -DurationMin 60 -Dir D:\videos\tv -Title "news 23-10"
 
-# A YouTube video as a smaller H.265 file
-.\record.ps1 "https://www.youtube.com/watch?v=..." -Compress
+# A YouTube video, kept as the H.264 recording (no H.265 pass, done right away)
+.\record.ps1 "https://www.youtube.com/watch?v=..." -NoCompress
 
 # A members-only page, logged in with your own cookies
 .\record.ps1 https://site.com/page -Cookies .\site-cookies.txt -DurationMin 10
@@ -215,7 +215,7 @@ This happens on camera, so the first seconds show the page and Chrome's "press E
 | Format | AAC-LC in `.m4a` (default) or MP3 (`-AudioFormat mp3`, LAME, constant bitrate), 44.1 kHz stereo (Spotify's own sample rate, so nothing is resampled) |
 | Bitrate | m4a: 256 kbit/s by default (about 1.9 MB per minute), `-AudioBitrate` 128–256. mp3: 320 kbit/s by default (about 2.4 MB per minute), 128–320 |
 | Length | **Automatic on a Spotify album or playlist**: the track list's times added up, see below. Otherwise `-Duration` / `-DurationMin`, or until Ctrl+C. Stopping keeps everything so far |
-| Not with | `-Compress`, `-KeepOriginal` (they re-encode video). `-Output` must end in `.m4a`, or `.mp3` with `-AudioFormat mp3` |
+| Not with | `-Compress`, `-KeepOriginal` (they re-encode video; audio is never re-encoded). `-Output` must end in `.m4a`, or `.mp3` with `-AudioFormat mp3` |
 | If saving fails | m4a: the raw capture is kept next to it as `<name>.aac`. mp3: the capture is already the final file and is saved as such |
 
 **Automatic length.** On an album or playlist page, without `-Duration`/`-DurationMin`, the tool records exactly the album:
@@ -259,14 +259,14 @@ Some sites tie a session to your device and will ask you to sign in again; Googl
 
 ## File size and compression
 
-| Content | H.264 (default) |
+| Content | H.264 recording (`-NoCompress`) |
 |---|---|
 | Busy 1080p30 video (YouTube interview) | about 7.5 MB/min, 650–700 MB per 90 min |
 | Static web page | a few hundred KB/min |
 
 These figures were measured at 30 fps. At the default 60 fps, busy video produces larger files; this hasn't been measured yet. `-Fps 30` returns to the sizes above.
 
-`-Compress` re-encodes the finished file to H.265 on all CPU cores Docker can see. It is **30–45 % smaller** but slow: about 1–2.5 minutes per minute of video on a 12-thread PC, so roughly 1.5–4 hours for a 90-minute recording. If you press Ctrl+C or the compression fails, you keep the H.264 file. You also keep it when H.265 comes out bigger, which can happen with static pages.
+By default the finished video is re-encoded to H.265 on all CPU cores Docker can see. It is **30–45 % smaller** but slow: about 1–2.5 minutes per minute of video on a 12-thread PC, so roughly 1.5–4 hours for a 90-minute recording. If you press Ctrl+C or the compression fails, you keep the H.264 file. You also keep it when H.265 comes out bigger, which can happen with static pages. `-NoCompress` skips the pass and saves the H.264 file right away.
 
 ## How it works
 
@@ -414,7 +414,7 @@ docker rm tmp
 
 ## Output
 
-- H.264 video (libx264 `veryfast`, CRF 23) and AAC 128 kbit/s audio. The recorder writes a fragmented MP4; `-Compress` output is a regular MP4 with the index at the front.
+- H.264 video (libx264 `veryfast`, CRF 23) and AAC 128 kbit/s audio. The recorder writes a fragmented MP4. After the default H.265 pass the file is H.265 (libx265 `medium`, CRF 26) in a regular MP4 with the index at the front; with `-NoCompress` it stays the H.264 one.
 - The audio track is there even when the page is silent.
 - Page sound plays automatically; no click is needed.
 - With `-Audio`: an `.m4a` (AAC) or `.mp3` with the sound only, see [Audio only](#audio-only--audio).

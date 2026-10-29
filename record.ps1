@@ -75,8 +75,12 @@ param(
     [switch] $KeepPage,
 
     # After recording, re-encode to H.265: 30-45% smaller, but takes about
-    # 1-2.5x the recording's length on all CPU cores.
+    # 1-2.5x the recording's length on all CPU cores. On by default for
+    # video; kept so existing commands still work.
     [switch] $Compress,
+
+    # Keep the live H.264 recording as it is, without the H.265 pass.
+    [switch] $NoCompress,
 
     # H.265 quality for -Compress: lower is better and bigger; 26 looks about
     # like the live H.264 recording.
@@ -202,21 +206,21 @@ AUDIO ONLY
   Ctrl+C always stops early.
   Works with -Duration/-DurationMin, -Cookies, -CookieBanner, -Title, -Dir
   and -Output (named .m4a or .mp3 to match); not with -Compress or
-  -KeepOriginal. Spotify needs a login: pass your exported cookies with
-  -Cookies.
+  -KeepOriginal (an audio file is never re-encoded). Spotify needs a login:
+  pass your exported cookies with -Cookies.
 
-COMPRESSION (runs after recording)
-  -Compress           Re-encode to H.265: usually 30-45% smaller, but takes
-                      about 1-2.5 minutes per minute of video on all cores.
-                      Ctrl+C or a failure keeps the H.264 file; so does an
-                      H.265 file that came out bigger.
+COMPRESSION (runs after recording, on by default for video)
+  The recording is re-encoded to H.265: usually 30-45% smaller, but it
+  takes about 1-2.5 minutes per minute of video on all cores. Ctrl+C or a
+  failure keeps the H.264 file; so does an H.265 file that came out bigger.
+  -NoCompress         Skip it and keep the H.264 recording (fastest).
+  -Compress           Compress (the default; accepted for older commands).
   -Crf <0-51>         H.265 quality: lower is better and bigger. Default 26;
                       28 is fine for talking heads.
   -Preset <name>      H.265 speed: ultrafast, superfast, veryfast, faster,
                       fast, medium (default), slow, slower, veryslow.
                       Slower presets give smaller files.
-  -KeepOriginal       With -Compress, also keep the H.264 file as
-                      <name>.h264.mp4.
+  -KeepOriginal       Also keep the H.264 file as <name>.h264.mp4.
 
 DOCKER
   -Image <name>       Docker image to run. Default chrome-rec.
@@ -248,15 +252,15 @@ EXAMPLES
   .\record.ps1 https://example.com -Title "Evening news"
   .\record.ps1 https://tv.example/live -Fps 50 -Title news -DurationMin 60
   .\record.ps1 https://example.com -Dir D:\videos\tv -Title "Evening news"
-  .\record.ps1 https://www.youtube.com/watch?v=... -Compress
+  .\record.ps1 https://www.youtube.com/watch?v=... -NoCompress
   .\record.ps1 https://site.com/page -Cookies .\site-cookies.txt -Duration 600
   .\record.ps1 https://example.com -Width 1280 -Height 720 -Output D:\vids\demo.mp4
   .\record.ps1 https://example.com/... -Audio -Cookies .\cookies.txt -Title album
 
 GOOD TO KNOW
-  Size: about 7.5 MB per minute for busy 1080p30 video, more at 60 fps; a
-  static page takes a few hundred KB per minute. -Fps 30 or -Compress
-  make files smaller.
+  Size: before compression about 7.5 MB per minute for busy 1080p30 video,
+  more at 60 fps; a static page takes a few hundred KB per minute. The
+  H.265 pass and -Fps 30 make files smaller.
   CPU: 1080p at 50-60 fps needs about 3.5 cores. Lower -Fps or the size on
   small machines.
   Sound and picture are lined up to within about 40 ms. If sound can't be
@@ -283,6 +287,10 @@ if ($PSBoundParameters.ContainsKey('DurationMin')) {
 if ($Audio -and ($Compress -or $KeepOriginal)) {
     throw '-Compress and -KeepOriginal re-encode video; they do not apply to -Audio.'
 }
+if ($NoCompress -and ($Compress -or $KeepOriginal)) {
+    throw '-NoCompress skips the H.265 pass; leave out -Compress and -KeepOriginal.'
+}
+$Compress = -not ($NoCompress -or $Audio)
 foreach ($p in 'AudioBitrate', 'AudioFormat') {
     if (-not $Audio -and $PSBoundParameters.ContainsKey($p)) { throw "-$p only applies together with -Audio." }
 }
