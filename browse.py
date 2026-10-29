@@ -11,6 +11,9 @@
                        and playlist pages, else the bottom-bar toggle) unless
                        it is already playing, after moving Spotify playback
                        into this browser; never goes fullscreen
+  browse.py exit-ip socks5://HOST:PORT
+                       print the public IP and country seen through the
+                       proxy; exit 1 when nothing gets through it
 
 With AUDIO_ONLY=1, `open` already moves Spotify playback into this browser.
 
@@ -21,6 +24,9 @@ import json
 import math
 import os
 import re
+import socket
+import ssl
+import struct
 import subprocess
 import sys
 import time
@@ -737,6 +743,61 @@ def play_audio():
             "(playing on another device, paused, or blocked)")
 
 
+def recv_exact(sock, n):
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            raise OSError("the proxy closed the connection")
+        data += chunk
+    return data
+
+
+# Plain sockets: the image has no curl, and Chrome must not open anything
+# before the proxy is known to work.
+def exit_ip(proxy):
+    m = re.fullmatch(r"socks5://([^\s/:]+):(\d{1,5})", proxy)
+    if not m:
+        log(f"error: not a socks5://host:port proxy: {proxy}")
+        sys.exit(1)
+    host, port = m.group(1), int(m.group(2))
+    problems = []
+    for site, path in (("api.country.is", "/"), ("ipinfo.io", "/json")):
+        try:
+            with socket.create_connection((host, port), timeout=15) as raw:
+                raw.settimeout(15)
+                raw.sendall(b"\x05\x01\x00")
+                if recv_exact(raw, 2) != b"\x05\x00":
+                    raise OSError("the proxy refused the SOCKS5 greeting")
+                # The name goes to the proxy unresolved, as Chrome sends it,
+                # so no lookup happens on the server.
+                raw.sendall(b"\x05\x01\x00\x03" + bytes([len(site)]) + site.encode() + struct.pack(">H", 443))
+                _, status, _, kind = recv_exact(raw, 4)
+                if status:
+                    raise OSError(f"the proxy could not connect (SOCKS5 reply {status})")
+                # The bound address that ends the reply: IPv4, name or IPv6, then the port.
+                size = {1: 4, 4: 16}.get(kind) or recv_exact(raw, 1)[0]
+                recv_exact(raw, size + 2)
+                with ssl.create_default_context().wrap_socket(raw, server_hostname=site) as tls:
+                    tls.sendall(f"GET {path} HTTP/1.1\r\nHost: {site}\r\nAccept: application/json\r\n"
+                                "User-Agent: play-action\r\nConnection: close\r\n\r\n".encode())
+                    data = b""
+                    while chunk := tls.recv(65536):
+                        data += chunk
+            head, _, body = data.partition(b"\r\n\r\n")
+            status_line = head.split(b"\r\n")[0].decode(errors="replace")
+            if " 200 " not in f"{status_line} ":
+                raise OSError(f"answered {status_line}")
+            # A chunked body still holds the whole object between its braces.
+            info = json.loads(body[body.index(b"{"):body.rindex(b"}") + 1])
+            log(f"exit IP through the proxy: {info['ip']} ({info.get('country') or 'country unknown'})")
+            return
+        except (OSError, ValueError, KeyError) as e:
+            problems.append(f"{site}: {e}")
+    log(f"error: nothing gets through the proxy {proxy}: {'; '.join(problems)}")
+    sys.exit(1)
+
+
 def main():
     if sys.argv[1:2] == ["open"] and len(sys.argv) == 3:
         open_url(sys.argv[2])
@@ -744,6 +805,8 @@ def main():
         play()
     elif sys.argv[1:] == ["play-audio"]:
         play_audio()
+    elif sys.argv[1:2] == ["exit-ip"] and len(sys.argv) == 3:
+        exit_ip(sys.argv[2])
     else:
         sys.exit(__doc__)
 

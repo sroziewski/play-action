@@ -114,6 +114,7 @@ An existing file of the same name is overwritten.
 | `-CookieBanner <x>` | `reject` | `reject` optional cookies, `accept` (for pages that only work after accepting), or `keep` to leave the banner alone |
 | `-Cookies <file>` | | `cookies.txt` or JSON exported from your browser, so the page opens logged in ([details](#logged-in-pages--cookies)) |
 | `-KeepPage` | off | Record the whole page instead of making the video fullscreen |
+| `-Proxy <url>` | | `socks5://host:port` that all of Chrome's traffic goes through, DNS included, as the container reaches it (e.g. `socks5://host.docker.internal:1080` on Docker Desktop). Never falls back to a direct connection; the recording aborts if nothing gets through at the start. For the remote script, [`-ViaLaptop`](#browsing-through-your-own-connection--vialaptop) sets it up |
 
 ### Compression
 
@@ -306,6 +307,7 @@ Picture and sound are deliberately recorded by separate processes. In a single f
 | `-Ip`, `-User`, `-Key`, `-Port` | **Required.** Server address, login, private key file, SSH port |
 | `-Setup` | Install what's missing on an **Ubuntu** server first (needs passwordless sudo), see below. Alone or together with a recording |
 | `-Detach` | Start and return at once |
+| `-ViaLaptop` | Chrome on the server browses through this machine's internet connection, see [below](#browsing-through-your-own-connection--vialaptop) |
 | `-Attach` | Follow the latest recording again, and download it when it ends |
 | `-Stop` | End the latest recording early, as Ctrl+C would; what was recorded is still saved and downloaded |
 | `-Run <id>` | With `-Attach`/`-Stop`: that recording instead of the latest (the id is printed when it starts) |
@@ -327,6 +329,7 @@ Picture and sound are deliberately recorded by separate processes. In a single f
 - **PowerShell 7** from Microsoft's repository.
 - **Docker access:** your login is added to the `docker` group.
 - **Keeping recordings alive through upgrades:** unattended upgrades skip Docker, needrestart doesn't restart containerd, and Docker's `live-restore` keeps containers running across a patch-level daemon restart. An upgrade of Docker would otherwise restart every container and end a running recording.
+- **For `-ViaLaptop`:** `/etc/ssh/sshd_config.d/10-play-action.conf` sets `GatewayPorts clientspecified` for your login only, so its tunnel can listen on the Docker bridge address. sshd validates the setting first (`sshd -t`); if ufw is active, a rule lets containers reach ports 20000–39999 on `docker0`.
 
 What every run does:
 1. **Checks the server:** Linux x86_64, git, and Docker usable by the login.
@@ -354,6 +357,27 @@ To end it early, for example when the film is over before `-Duration` runs out (
 ```
 
 Without `-Run`, both act on the latest recording.
+
+### Browsing through your own connection (`-ViaLaptop`)
+
+Some sites play only in one country: Nowe Horyzonty VOD, for example, is Poland-only. With `-ViaLaptop`, Chrome on the server browses through the internet connection of the machine you run the script on. Sites then see that machine's IP and country instead of the server's:
+
+```powershell
+.\deploy-play-action.ps1 https://example.pl/vod/... -ViaLaptop -Cookies .\cookies.txt -Ip 203.0.113.7 -User me -Key ~\.ssh\id_ed25519 -Port 22
+```
+
+How it works:
+1. **The tunnel:** a reverse SSH SOCKS tunnel (`ssh -R`) makes this machine a proxy that listens on the server's Docker bridge address. Run `-Setup` once first, so sshd allows that.
+2. **The exit check:** before the page opens, the container connects through the tunnel and prints `browse: exit IP through the proxy: … (PL)`. If nothing gets through, the run aborts before recording.
+3. **No leaks:** Chrome sends everything through the tunnel, DNS included, and limits WebRTC to the proxy. With the tunnel down, pages fail to load; Chrome never falls back to the server's own connection.
+
+What to keep in mind:
+- **The tunnel's process:** a hidden ssh process on your machine carries the tunnel until the recording ends; the server tells it when. The H.265 pass afterwards needs no tunnel. The process is separate from the terminal, so Ctrl+C, `-Detach` or closing the window don't end it.
+- **Drops:** a drop is noticed within about 30 s, and the tunnel reconnects for up to 10 minutes. A session the server still holds from before the drop is cleared first. The log is in `%TEMP%\play-action-tunnel-<id>.log`.
+- **Who else can use it:** while it runs, the tunnel is an unauthenticated SOCKS proxy on the server's Docker bridge address. Every container and every user on the server can reach it, and through it anything your machine can reach, your home network included. Use it only on a server you alone control.
+- **Keep your machine awake and online until the recording ends.** Sleep or a lost connection stalls the stream, and the recording shows that.
+- **Bandwidth:** the video crosses your connection twice, down from the site and up to the server. 1080p takes about 5–8 Mbit/s each way.
+- **When the remote run pays off:** if your machine is in the right country anyway, `.\record.ps1` locally needs no tunnel. The remote run then only saves your CPU, mostly the H.265 pass.
 
 Notes:
 - **Server requirements:** your login must be allowed to use Docker; `-Setup` handles that, otherwise run `sudo usermod -aG docker <login>`. The first run builds the Docker image, which takes a few minutes.
@@ -411,6 +435,7 @@ docker rm tmp
 | `AUDIO_ONLY` | `0` | `1` records only the sound (see `AUDIO_FORMAT`; name `OUT` to match) |
 | `AUDIO_BITRATE` | `256` | Bitrate in kbit/s for `AUDIO_ONLY=1` |
 | `AUDIO_FORMAT` | `m4a` | `m4a` (AAC) or `mp3`; name `OUT` to match |
+| `PROXY` | *(empty)* | `socks5://host:port` for all of Chrome's traffic; the container exits 1 when nothing gets through it |
 
 ## Output
 
@@ -443,6 +468,8 @@ docker rm tmp
 | The first seconds show the page, not the video | Expected: the play and fullscreen clicks happen on camera |
 | `No recording was produced` | You stopped during warm-up, or the recorder failed. The last 30 log lines are printed |
 | Changes to `browse.py` or `entrypoint.sh` don't apply | Add `-Build` |
+| `-ViaLaptop`: `sshd put the tunnel on 127.0.0.1:…` | Run `-Setup` once; sshd must allow the login to choose where its tunnel listens |
+| `-ViaLaptop`: `nothing gets through the proxy` | A firewall on the server blocks containers from reaching the host: with ufw, `-Setup` adds the rule; with other firewalls, allow TCP 20000–39999 in on `docker0` |
 
 ## License
 

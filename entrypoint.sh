@@ -49,9 +49,22 @@ pactl set-default-sink rec
 Xvfb "$DISPLAY" -screen 0 "$((WIDTH + 1))x$((HEIGHT + 1))x24" -nolisten tcp &
 wait_for Xvfb xdpyinfo
 
+# With a proxy nothing may leave directly: Chrome has no fallback to a
+# direct connection, the resolver rules stop its DNS prefetch from looking
+# names up here (SOCKS5 sends them to the proxy), and WebRTC may use UDP only
+# through the proxy, which a SOCKS proxy never offers.
+proxy_args=()
+if [[ -n ${PROXY:-} ]]; then
+  browse.py exit-ip "$PROXY" || exit 1
+  proxy_host=${PROXY#*://}
+  proxy_host=${proxy_host%:*}
+  proxy_args=(--proxy-server="$PROXY" --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE $proxy_host"
+    --force-webrtc-ip-handling-policy=disable_non_proxied_udp)
+fi
+
 # --no-sandbox: Docker's default seccomp profile blocks the user namespaces
 # Chrome's sandbox needs; the container is the isolation boundary instead.
-google-chrome \
+google-chrome "${proxy_args[@]}" \
   --kiosk --window-position=0,0 --window-size="${WIDTH},${HEIGHT}" \
   --no-sandbox --no-first-run --no-default-browser-check \
   --disable-dev-shm-usage --disable-gpu \

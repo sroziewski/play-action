@@ -39,7 +39,8 @@ ENV URL=https://example.com \
     OUT=/out/recording.mp4 \
     AUDIO_ONLY=0 \
     AUDIO_BITRATE=256 \
-    AUDIO_FORMAT=m4a
+    AUDIO_FORMAT=m4a \
+    PROXY=
 
 VOLUME /out
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

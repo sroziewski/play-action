@@ -103,6 +103,13 @@ param(
     [ValidateSet('reject', 'accept', 'keep')]
     [string] $CookieBanner = 'reject',
 
+    # SOCKS5 proxy all of Chrome's traffic goes through, as seen from inside
+    # the container; the recording aborts when nothing gets through it.
+    # Case-sensitive like the container's own check, which would otherwise
+    # fail only once the run has started.
+    [ValidateScript({ $_ -cmatch '^socks5://[^\s/:]+:(\d{1,5})$' -and [int]$Matches[1] -in 1..65535 })]
+    [string] $Proxy,
+
     # Rebuild the image even if it already exists.
     [switch] $Build,
 
@@ -179,6 +186,14 @@ PAGE HANDLING
                       It is copied into the container, never mounted.
   -KeepPage           Record the whole page instead of the fullscreen video
                       (YouTube and pages with a .play-action player).
+  -Proxy <url>        socks5://host:port that all of Chrome's traffic goes
+                      through (DNS too), as the container reaches it; e.g.
+                      socks5://host.docker.internal:1080 on Docker Desktop.
+                      Nothing goes out directly: when the proxy is down the
+                      page doesn't load, and when nothing gets through at the
+                      start the recording aborts. Its exit IP and country are
+                      printed with the "browse:" lines. deploy-play-action.ps1
+                      -ViaLaptop sets this up by itself.
 
 AUDIO ONLY
   -Audio              Record only the page's sound, to <name>.m4a (AAC) or
@@ -329,6 +344,8 @@ $missing = $LASTEXITCODE -ne 0
 # one built before mp3 support an .m4a under the .mp3 name.
 $outdated = $Audio -and -not $missing -and ("$imageEnv" -notmatch '"AUDIO_ONLY=' -or
     ($AudioFormat -eq 'mp3' -and "$imageEnv" -notmatch '"AUDIO_FORMAT='))
+# One from before -Proxy would ignore it and browse from this machine's own IP.
+$outdated = $outdated -or ($Proxy -and -not $missing -and "$imageEnv" -notmatch '"PROXY=')
 if ($Build -or $missing -or $outdated) {
     Write-Host "Building image $Image..."
     # deploy-play-action.ps1 compares this label with the server's checkout
@@ -382,6 +399,7 @@ if ($Audio) {
 }
 if ($Duration) { $runArgs += '-e', "DURATION=$Duration" }
 if ($Cookies) { $runArgs += '-e', 'COOKIES=/tmp/cookies.txt' }
+if ($Proxy) { $runArgs += '-e', "PROXY=$Proxy" }
 $runArgs += $Image
 
 docker @runArgs | Out-Null
@@ -455,6 +473,7 @@ function Compress-Recording([string] $source, [string] $target) {
 # The copy-out lives in `finally` so that Ctrl+C, which ends the wait loop,
 # still stops the recorder cleanly and saves what was recorded so far.
 $startedAt = $null
+$exitShown = $false
 $limit = $Duration
 $setup = [Diagnostics.Stopwatch]::StartNew()
 try {
@@ -462,6 +481,11 @@ try {
         # The markers are on the container's stdout; its stderr is only noise.
         if (-not $startedAt) {
             $log = docker logs $name 2>$null
+            # Shown before the page opens, so a wrong country is seen in time to stop.
+            if ($Proxy -and -not $exitShown) {
+                $exitLine = $log | Where-Object { "$_" -like 'browse: exit IP *' } | Select-Object -First 1
+                if ($exitLine) { Write-Host ("`r" + "  $exitLine".PadRight(60)); $exitShown = $true }
+            }
             if ($log | Select-String -SimpleMatch 'recording started' -Quiet) {
                 $startedAt = Get-Date
                 # -Audio without a length: the recorder took it from the track
@@ -502,7 +526,8 @@ finally {
     Write-Host ''
     # Generous timeout: after a stop the container still trims the file's end.
     docker stop -t 120 $name *> $null
-    docker logs $name 2>$null | Where-Object { "$_" -like 'browse: *' } | ForEach-Object { Write-Host "  $_" }
+    docker logs $name 2>$null | Where-Object { "$_" -like 'browse: *' -and -not ($exitShown -and "$_" -like 'browse: exit IP *') } |
+        ForEach-Object { Write-Host "  $_" }
     $exitCode = [int](docker inspect -f '{{.State.ExitCode}}' $name)
     docker cp "${name}:/out/recording$ext" $Output *> $null
     $copied = $LASTEXITCODE -eq 0

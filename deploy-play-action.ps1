@@ -103,6 +103,11 @@ param(
     [Parameter(ParameterSetName = 'Record')]
     [switch] $Detach,
 
+    # Chrome on the server browses through this machine's internet
+    # connection, so sites see this machine's IP and country.
+    [Parameter(ParameterSetName = 'Record')]
+    [switch] $ViaLaptop,
+
     # Leave the finished recording on the server only.
     [switch] $NoDownload,
 
@@ -194,10 +199,21 @@ OPTIONS OF THIS SCRIPT
   -Setup              Install what is missing on an Ubuntu server first:
                       Docker (from Docker's repository; a snap Docker is
                       removed), git, screen, PowerShell 7, the login in the
-                      docker group, and no automatic Docker restarts by
-                      unattended upgrades. Needs passwordless sudo. Alone
-                      or together with a recording.
+                      docker group, no automatic Docker restarts by
+                      unattended upgrades, and sshd letting the login's
+                      -ViaLaptop tunnel listen for containers. Needs
+                      passwordless sudo. Alone or together with a recording.
   -Detach             Start and return at once; follow later with -Attach.
+  -ViaLaptop          Chrome on the server browses through this machine's
+                      internet connection (a reverse SSH SOCKS tunnel), so
+                      sites see this machine's IP, e.g. a Polish one for
+                      Poland-only VOD. A hidden ssh process here carries it
+                      until the recording ends (it reconnects after a drop;
+                      Ctrl+C or -Detach don't end it). Keep this machine
+                      awake and online meanwhile: without it the page stalls,
+                      it never falls back to the server's own IP. The video
+                      passes through this connection twice (down and up,
+                      ~5-8 Mbit/s each for 1080p). Run -Setup once first.
   -Attach             Follow the latest recording again (and download it).
   -Stop               End the latest recording early, as Ctrl+C would; it
                       is still saved and downloaded.
@@ -244,6 +260,10 @@ All other options are record.ps1's, with the same names and meaning:
         try { & $record @local -ValidateOnly }
         catch {
             Write-Host "Error: $($_.Exception.Message)"
+            exit 1
+        }
+        if ($ViaLaptop -and $PSBoundParameters.ContainsKey('Proxy')) {
+            Write-Host 'Error: -ViaLaptop sets the proxy itself; use either -ViaLaptop or -Proxy.'
             exit 1
         }
     }
@@ -432,6 +452,29 @@ if [[ ! -s /etc/docker/daemon.json ]]; then
 elif ! grep -q '"live-restore"' /etc/docker/daemon.json; then
   say "note: /etc/docker/daemon.json exists, so live-restore was not added; add \"live-restore\": true to keep recordings through Docker restarts"
 fi
+# -ViaLaptop's tunnel has to listen on the Docker bridge's address, where
+# containers reach the host; sshd puts every remote forward on loopback
+# unless GatewayPorts lets the login choose. Only this login gets that, and
+# its tunnels only listen where it asks. sshd keeps the first value it reads
+# and Ubuntu includes the drop-ins first, hence the early name; `Match all`
+# keeps the block from running on into whatever is read next. A config sshd
+# rejects is taken back before anything reloads it.
+if grep -qiE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config 2>/dev/null; then
+  conf=/etc/ssh/sshd_config.d/10-play-action.conf
+  printf '%s\n' "Match User $me" '    GatewayPorts clientspecified' 'Match all' | sudo -n tee "$conf" >/dev/null
+  if check=$(sudo -n sshd -t 2>&1); then
+    sudo -n systemctl reload ssh >/dev/null 2>&1 || sudo -n systemctl reload sshd >/dev/null 2>&1 || true
+  else
+    sudo -n rm -f "$conf"
+    say "note: sshd's config check failed with the -ViaLaptop setting, so it was left out and -ViaLaptop will not work: $(tr '\n' ' ' <<<"$check")"
+  fi
+else
+  say "note: /etc/ssh/sshd_config includes no sshd_config.d; for -ViaLaptop add: Match User $me / GatewayPorts clientspecified"
+fi
+# With ufw on, containers can't reach the host's own ports either.
+if sudo -n ufw status 2>/dev/null | grep -q '^Status: active'; then
+  sudo -n ufw allow in on docker0 proto tcp to any port 20000:39999 comment play-action-via-laptop >/dev/null
+fi
 # The enable above may fail quietly; "ready" with no daemon would send the
 # next recording back here with "cannot use Docker".
 sudo -n docker info >/dev/null 2>&1 || fail "Docker is installed but its daemon is not running; see: sudo systemctl status docker"
@@ -520,6 +563,10 @@ free_kb() { df -Pk "$1" 2>/dev/null | awk 'NR == 2 { print $4 }'; }
 echo "FREE_DIR=$(free_kb "$dir")"
 root=$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || true)
 [[ -n $root && -d $root ]] && echo "FREE_DOCKER=$(free_kb "$root")"
+# Where containers on the default network reach the host (-ViaLaptop).
+bridge=$(docker network inspect bridge -f '{{range .IPAM.Config}}{{.Gateway}} {{end}}' 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1 || true)
+[[ -n $bridge ]] || bridge=$(ip -4 -o addr show docker0 2>/dev/null | awk '{ print $4 }' | cut -d/ -f1 | head -1 || true)
+[[ -n $bridge ]] && echo "BRIDGE=$bridge"
 true
 '@
 
@@ -670,6 +717,165 @@ id=$2
 ln -sfn -- "$saved" ~/.play-action/dl/"$id"
 '@
 
+    # The server end of -ViaLaptop's tunnel: it confirms the forward listens
+    # where containers reach it, then holds the connection open while the
+    # recording runs. Exit codes steer the supervisor (Start-Tunnel): 0 the
+    # recording is over, 4 sshd needs -Setup, 5 the recording never started,
+    # 6 a stale session was cleared (retry), 7 the port is taken.
+    $tunnelScript = @'
+set -euo pipefail
+dir=$(printf %s "$1" | base64 -d)
+id=$2
+bind=$3
+port=$4
+mine=" "
+p=$$
+while [[ -n $p && $p -gt 1 ]]; do mine+="$p "; p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ' || true); done
+# After a dropped connection the server keeps the dead session, and its
+# forward holds the port, until TCP gives up on it hours later. Its copy of
+# this script is still waiting and shows which session that is: sshd's own
+# processes hide their sockets from the login (`ss -p` names no owner).
+cleared=
+for other in $(pgrep -u "$(id -u)" -f -- "bash -s -- [^ ]+ $id $bind $port\$" || true); do
+  [[ $mine == *" $other "* ]] && continue
+  p=$other
+  while [[ -n $p && $p -gt 1 ]]; do
+    if [[ $(ps -o comm= -p "$p" 2>/dev/null) == sshd* ]]; then kill "$p" 2>/dev/null && cleared=1; break; fi
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ' || true)
+  done
+done
+if [[ -n $cleared ]]; then
+  # A retry that comes before the dying session lets go of the port would
+  # be refused it.
+  for _ in $(seq 50); do
+    [[ -z $(ss -Hltn "sport = :$port" 2>/dev/null || true) ]] && break
+    sleep 0.2
+  done
+  echo "play-action: cleared the tunnel's previous session"
+  exit 6
+fi
+# A forward answers a SOCKS5 greeting through to this machine's ssh: a dead
+# session never answers, another program not like that. Another live tunnel
+# on the same random port would pass too (two -ViaLaptop runs at once, one
+# chance in 20000); its own forward refused, this one would use that one.
+socks_ok() {
+  local reply
+  exec 3<>"/dev/tcp/$bind/$port" || return 1
+  printf '\x05\x01\x00' >&3
+  reply=$(timeout 10 head -c 2 <&3 | od -An -tx1 | tr -d ' \n' || true)
+  exec 3<&- 3>&-
+  [[ $reply == 0500 ]]
+}
+ok=
+for _ in 1 2 3 4 5; do
+  socks_ok 2>/dev/null && { ok=1; break; }
+  sleep 0.4
+done
+if [[ -z $ok ]]; then
+  addr=$(ss -Hltn "sport = :$port" 2>/dev/null | awk '{ print $4 }' | head -1 || true)
+  if [[ $addr == 127.0.0.1:* || $addr == "[::1]:"* ]]; then
+    echo "play-action: error: the server's sshd put the tunnel on $addr, where containers can't reach it; run -Setup once (it allows $bind for this login)" >&2
+    exit 4
+  fi
+  echo "play-action: error: port $port on the server is taken, or sshd refused the tunnel (AllowTcpForwarding?)" >&2
+  exit 7
+fi
+echo TUNNEL_UP
+cd "$dir"
+# The recording starts right after the first TUNNEL_UP; its pid file comes
+# with it, rewritten once (read until it holds a pid).
+pid=
+for _ in $(seq 120); do
+  pid=$(cat "logs/$id.pid" 2>/dev/null || true)
+  [[ -n $pid ]] && break
+  sleep 1
+done
+[[ -n $pid ]] || { echo "play-action: the recording never started; closing the tunnel"; exit 5; }
+# The H.265 pass needs no page, so the tunnel ends where it starts.
+while kill -0 "$pid" 2>/dev/null && ! grep -q 'Compressing to H.265' "logs/$id.log" 2>/dev/null; do sleep 5; done
+echo TUNNEL_DONE
+'@
+
+    # A separate, hidden process, so that the tunnel outlives Ctrl+C, -Detach
+    # and a closed window: the recording needs it to the end, and the server
+    # end closes it then. ExitOnForwardFailure is left off: a stale session
+    # holding the port then still gets the command that clears it.
+    function Start-Tunnel([string] $remoteDir, [string] $id, [string] $bind, [int] $tunnelPort, [string] $log) {
+        $command = 'echo ' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($tunnelScript -replace "`r?`n", "`n"))) +
+            " | base64 -d | bash -s -- $(ConvertTo-Base64 $remoteDir) $id $bind $tunnelPort"
+        $settings = @{
+            Ssh = (Get-Command ssh).Source
+            # ssh keeps the first value of an option: a drop is noticed after
+            # 30 s instead of 90, while the stream stalls.
+            Args = @('-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=3') + @($sshOptions) +
+                @('-p', $Port, '-R', "${bind}:$tunnelPort", $target, $command)
+            Log = $log
+        } | ConvertTo-Json -Compress
+        $supervisor = @"
+`$s = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($settings)))')) | ConvertFrom-Json
+`$ErrorActionPreference = 'Continue'
+`$wasUp = `$false
+`$down = [Diagnostics.Stopwatch]::StartNew()
+while (`$true) {
+    & `$s.Ssh @(`$s.Args) 2>&1 | ForEach-Object {
+        if ("`$_" -eq 'TUNNEL_UP') { `$wasUp = `$true; `$down.Restart() }
+        [IO.File]::AppendAllText(`$s.Log, "`$_``n")
+    }
+    `$code = `$LASTEXITCODE
+    [IO.File]::AppendAllText(`$s.Log, "TUNNEL_EXIT=`$code``n")
+    # Taken port and missing -Setup end only the first attempt: later, the
+    # port is ours and only held a moment longer by the session it replaces.
+    if (`$code -in 0, 5 -or (-not `$wasUp -and `$code -in 4, 7)) { break }
+    # 10 minutes without a connection: the stream has long stalled.
+    if (`$down.Elapsed.TotalMinutes -gt 10) { break }
+    if (`$code -ne 6) { Start-Sleep -Seconds 5 }
+}
+Remove-Item -LiteralPath `$PSCommandPath -ErrorAction SilentlyContinue
+"@
+        # A file, not -EncodedCommand: the embedded server script would take
+        # most of Windows' 32K command line.
+        $file = [IO.Path]::ChangeExtension($log, '.ps1')
+        [IO.File]::WriteAllText($file, $supervisor, [Text.UTF8Encoding]::new($true))
+        # The host's own path would be powershell_ise.exe in the ISE.
+        $shell = if ($PSVersionTable.PSEdition -eq 'Desktop') { Join-Path $PSHOME 'powershell.exe' } else { (Get-Process -Id $PID).Path }
+        $start = @{
+            FilePath = $shell
+            ArgumentList = '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', "`"$file`""
+            PassThru = $true
+        }
+        if ($env:OS -eq 'Windows_NT') { $start.WindowStyle = 'Hidden' }
+        elseif (Get-Command setsid -ErrorAction SilentlyContinue) {
+            # Elsewhere the child shares the terminal's session, and Ctrl+C or
+            # closing the terminal would end the tunnel.
+            $start.ArgumentList = @($shell) + $start.ArgumentList
+            $start.FilePath = 'setsid'
+            $start.RedirectStandardOutput = '/dev/null'
+            $start.RedirectStandardInput = '/dev/null'
+        }
+        Start-Process @start
+    }
+
+    # The supervisor's ssh is its child: stopping only the supervisor would
+    # leave ssh holding the tunnel.
+    function Stop-Tunnel($process, [string] $log) {
+        if ($env:OS -eq 'Windows_NT') { taskkill /PID $process.Id /T /F *> $null }
+        else {
+            & pkill -P $process.Id 2>$null
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        }
+        # Killed, it can't delete its own script.
+        Remove-Item -LiteralPath ([IO.Path]::ChangeExtension($log, '.ps1')) -ErrorAction SilentlyContinue
+    }
+
+    # The log is appended to by the supervisor while this reads it.
+    function Read-TunnelLog([string] $log) {
+        try {
+            $stream = [IO.File]::Open($log, 'Open', 'Read', 'ReadWrite')
+            try { [IO.StreamReader]::new($stream).ReadToEnd() } finally { $stream.Dispose() }
+        }
+        catch { '' }
+    }
+
     $cleanupScript = @'
 set -euo pipefail
 rm -f -- ~/.play-action/dl/"$1" ~/.play-action/cookies/"$1".txt
@@ -789,7 +995,7 @@ rm -f -- ~/.play-action/dl/"$1" ~/.play-action/cookies/"$1".txt
     Assert-Remote $prepared 'Preparing the server'
     $info = @{}
     foreach ($line in Get-Text $prepared) {
-        if ($line -match '^(HOME|PWSH|DIR|IMAGE|FREE_DIR|FREE_DOCKER)=(.*)$') { $info[$Matches[1]] = $Matches[2] }
+        if ($line -match '^(HOME|PWSH|DIR|IMAGE|FREE_DIR|FREE_DOCKER|BRIDGE)=(.*)$') { $info[$Matches[1]] = $Matches[2] }
         elseif ($line -like 'play-action:*') { Write-Host "  $line" }
     }
     $remoteDir = $info.DIR
@@ -848,11 +1054,48 @@ rm -f -- ~/.play-action/dl/"$1" ~/.play-action/cookies/"$1".txt
         Write-Host "  uploaded the cookies (deleted on the server when the recording ends)"
     }
 
+    $tunnel = $null
+    if ($ViaLaptop) {
+        if (-not $info.BRIDGE) {
+            Invoke-Remote $cleanupScript @($id) *> $null
+            throw "The server's Docker has no default bridge network, which -ViaLaptop needs."
+        }
+        $tunnelLog = Join-Path ([IO.Path]::GetTempPath()) "play-action-tunnel-$id.log"
+        $problem = $null
+        # Another port when the random one is taken on the server.
+        foreach ($attempt in 1..3) {
+            $tunnelPort = Get-Random -Minimum 20000 -Maximum 40000
+            Remove-Item -LiteralPath $tunnelLog -ErrorAction SilentlyContinue
+            $tunnel = Start-Tunnel $remoteDir $id $info.BRIDGE $tunnelPort $tunnelLog
+            $waited = [Diagnostics.Stopwatch]::StartNew()
+            $text = ''
+            while ($waited.Elapsed.TotalSeconds -lt 45 -and $text -notmatch '(?m)^TUNNEL_UP\r?$') {
+                Start-Sleep -Milliseconds 300
+                $text = Read-TunnelLog $tunnelLog
+                if ($tunnel.HasExited) { $text = Read-TunnelLog $tunnelLog; break }
+            }
+            if ($text -match '(?m)^TUNNEL_UP\r?$') { $problem = $null; break }
+            $problem = ($text -split '\r?\n' | Where-Object { $_ -like 'play-action: error:*' }) -join '; '
+            if (-not $problem) { $problem = (($text -split '\r?\n' | Where-Object { $_ -and $_ -notlike 'TUNNEL_EXIT=*' } | Select-Object -Last 3) -join '; ') }
+            if (-not $problem) { $problem = 'no answer from the server within 45 s' }
+            if (-not $tunnel.HasExited) { Stop-Tunnel $tunnel $tunnelLog }
+            if ($text -notmatch '(?m)^TUNNEL_EXIT=7\r?$') { break }
+        }
+        if ($problem) {
+            Invoke-Remote $cleanupScript @($id) *> $null
+            throw "The tunnel to this machine did not come up: $problem"
+        }
+        $options.Proxy = 'b64:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("socks5://$($info.BRIDGE):$tunnelPort"))
+        Write-Host "  tunnel up: Chrome on the server browses through this machine until the recording ends;"
+        Write-Host "  keep it awake and online until then (tunnel log: $tunnelLog)"
+    }
+
     $json = $options | ConvertTo-Json -Compress
     $started = Invoke-Remote $startScript @((ConvertTo-Base64 $remoteDir), (ConvertTo-Base64 $info.PWSH), (ConvertTo-Base64 $json), $id,
         (ConvertTo-Base64 $remoteCookies), $refresh) 2>&1
     $code = $LASTEXITCODE
     if ($code -ne 0) {
+        if ($tunnel) { Stop-Tunnel $tunnel $tunnelLog }
         Invoke-Remote $cleanupScript @($id) *> $null
         # The cleanup's own exit code would otherwise hide the failure.
         $global:LASTEXITCODE = $code
