@@ -437,9 +437,14 @@ function Format-Size([long] $bytes) {
 # reliable on every Docker Desktop setup.
 function Compress-Recording([string] $source, [string] $target) {
     $encName = "$name-x265"
+    # pools: x265 sizes its thread pool per NUMA node, and on VMs whose
+    # topology it can't read (Contabo's EPYC) it allocates none, which turns
+    # off wavefront rows and leaves 3 frame threads on 8 cores (18 instead
+    # of 36 fps at 1080p). Its "unable to set thread affinity" errors then
+    # are harmless and go to stderr, which is discarded.
     $script = 'ffprobe -v error -show_entries format=duration -of default=nw=1 /tmp/in.mp4 && ' +
         'ffmpeg -hide_banner -v error -nostats -progress pipe:1 -y -i /tmp/in.mp4 -map 0 ' +
-        "-c:v libx265 -preset $Preset -crf $Crf -tag:v hvc1 -x265-params log-level=error " +
+        "-c:v libx265 -preset $Preset -crf $Crf -tag:v hvc1 -x265-params log-level=error:pools=`$(nproc) " +
         '-c:a copy -movflags +faststart /tmp/out.mp4'
     docker create --name $encName --entrypoint sh $Image -c $script | Out-Null
     if ($LASTEXITCODE -ne 0) { return $false }
